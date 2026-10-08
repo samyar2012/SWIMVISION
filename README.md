@@ -122,7 +122,7 @@ SwimVision shows which device it is using in *Advanced detection & tracking sett
 
 ### First run needs internet (once)
 
-The first time you use detection/tracking, pretrained model files are downloaded into `models/` (SAM 2.1 base ≈ 155 MB and YOLO weights ≈ 20-50 MB from the Ultralytics GitHub releases; a 0.7 MB OpenCV tracker model). SAM 2 needs a graphics card to be practical: on an RTX 4070 Ti SUPER a 55 s 30 fps race takes about 5-6 minutes; on a CPU it is far slower. **Only model files are downloaded - your video is never uploaded.**
+The first time you use detection/tracking, pretrained model files are downloaded into `models/` (SAM 2.1 base ≈ 155 MB and YOLO weights ≈ 20-50 MB from the Ultralytics GitHub releases; a 0.7 MB OpenCV tracker model). SAM 2 needs a graphics card to be practical: on an RTX 4070 Ti SUPER (half precision, ~16 frames/s) a 55 s 30 fps race takes about 1.5-2 minutes; on a CPU it is far slower. Tracking runs in a background thread, so refreshing the page or clicking elsewhere does not cancel it. **Only model files are downloaded - your video is never uploaded.**
 
 ## Running locally
 
