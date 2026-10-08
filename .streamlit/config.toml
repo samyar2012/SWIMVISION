@@ -1,0 +1,13 @@
+[theme]
+base = "dark"
+primaryColor = "#22D3EE"
+backgroundColor = "#0B1220"
+secondaryBackgroundColor = "#101827"
+textColor = "#E5EAF1"
+
+[server]
+# Race videos are large; Streamlit's default limit is 200 MB.
+maxUploadSize = 1000
+
+[browser]
+gatherUsageStats = false

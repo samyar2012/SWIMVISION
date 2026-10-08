@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Secrets
+.env
+
+# Private user data - NEVER commit swim videos or analysis outputs
+uploads/*
+outputs/*
+data/*
+!uploads/.gitkeep
+!outputs/.gitkeep
+!data/.gitkeep
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.m4v
+
+# Model weights (downloaded automatically at runtime)
+*.pt
+*.onnx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

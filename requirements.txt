@@ -1,0 +1,23 @@
+# SwimVision dependencies. Tested with Python 3.12 (see README).
+# Python 3.14 is NOT recommended: PyTorch / Ultralytics / MediaPipe wheels lag behind.
+
+streamlit>=1.40
+opencv-python>=4.10        # NOT the "-headless" build: Ultralytics requires "opencv-python"
+                           # and having both installed makes them overwrite each other.
+numpy>=1.26
+pandas>=2.2
+scipy>=1.13
+plotly>=5.22
+python-dotenv>=1.0
+imageio-ffmpeg>=0.5        # bundles an FFmpeg binary (no manual FFmpeg install)
+
+# Phase 2: person detection + tracking (pretrained models, no training)
+ultralytics>=8.3           # YOLO + ByteTrack / BoT-SORT
+torch>=2.2                 # pip installs the CPU build by default. For an NVIDIA GPU
+                           # (much faster) see "GPU acceleration" in README.md.
+torchvision>=0.17
+
+# --- Added in later phases (not installed yet) ---
+# mediapipe     (Phase 3: pose estimation)
+# openai / google-genai (Phase 9: optional AI Coach text only)
+streamlit-image-coordinates>=0.4   # drag-to-draw the swimmer box
