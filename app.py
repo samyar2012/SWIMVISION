@@ -1,10 +1,11 @@
 """SwimVision - Streamlit entry point.
 
 Run with:  streamlit run app.py
+Developer mode (full tracebacks in the page):  set SWIMVISION_DEBUG=1 first.
 
 Page flow: with no active analysis we show the upload page; once the user
 continues (or reopens a saved analysis from the sidebar) we show that
-analysis' workspace (swimmer selection -> tracking results -> later phases).
+analysis' workspace (select swimmer -> track with SAM 2 -> result).
 """
 
 from __future__ import annotations
@@ -19,10 +20,20 @@ from ui.styles import inject_styles
 from ui.upload import ACTIVE_ANALYSIS_KEY, render_upload_page
 from ui.workspace import render_workspace
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 logger = logging.getLogger("swimvision")
 
 st.set_page_config(page_title="SwimVision", page_icon="🏊", layout="wide")
+
+
+@st.cache_resource
+def _configure_logging() -> None:
+    """Log to the terminal; in developer mode also to outputs/logs/swimvision.log (once per process)."""
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if config.DEBUG:
+        config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(config.LOGS_DIR / "swimvision.log", encoding="utf-8"))
+    logging.basicConfig(level=logging.DEBUG if config.DEBUG else logging.INFO, handlers=handlers, force=True,
+                        format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
 
 def _render_header() -> None:
@@ -35,6 +46,8 @@ def _render_header() -> None:
 
 def _render_sidebar() -> None:
     with st.sidebar:
+        if config.DEBUG:
+            st.warning("Developer mode (SWIMVISION_DEBUG=1): full errors are shown.")
         if st.button("＋ New analysis", width="stretch"):
             st.session_state.pop(ACTIVE_ANALYSIS_KEY, None)
             st.rerun()
@@ -43,7 +56,7 @@ def _render_sidebar() -> None:
         if not records:
             st.caption("None yet. Upload a video to create one.")
         for rec in records[:10]:
-            status = "tracked" if rec.tracking else "not tracked yet"
+            status = f"tracked {rec.tracking.stats.tracked_fraction:.0%}" if rec.tracking else "not tracked yet"
             if st.button(rec.original_filename, key=f"open_{rec.analysis_id}", width="stretch",
                          help=f"{rec.race.label} · {rec.video.duration_s:.1f} s · id {rec.analysis_id}"):
                 st.session_state[ACTIVE_ANALYSIS_KEY] = rec.analysis_id
@@ -60,15 +73,16 @@ def _render_main() -> None:
         return
     try:
         record = load_analysis(active_id)
-    except (FileNotFoundError, KeyError, ValueError):
+    except FileNotFoundError:
         st.session_state.pop(ACTIVE_ANALYSIS_KEY, None)
-        st.warning("That saved analysis could not be opened.")
+        st.warning("That saved analysis no longer exists.")
         render_upload_page()
         return
     render_workspace(record)
 
 
 def main() -> None:
+    _configure_logging()
     config.ensure_directories()
     cleanup_orphan_uploads()  # remove old unsaved uploads (privacy)
     inject_styles()
@@ -76,10 +90,15 @@ def main() -> None:
     _render_sidebar()
     try:
         _render_main()
-    except Exception:  # last-resort guard: never show a raw traceback to the user
+    except Exception as exc:  # Streamlit's own rerun/stop signals are BaseException and pass through
         logger.exception("Unexpected error")
-        st.error("Something unexpected went wrong. Please try again, or try a different video. "
-                 "Details were written to the terminal log.")
+        if config.DEBUG:
+            st.error(f"{type(exc).__name__}: {exc}")
+            st.exception(exc)
+        else:
+            st.error(f"Something went wrong: {type(exc).__name__}: {exc}\n\n"
+                     "The full traceback is in the terminal. Start the app with SWIMVISION_DEBUG=1 "
+                     "to see it here.")
 
 
 main()

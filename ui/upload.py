@@ -11,7 +11,7 @@ import streamlit as st
 
 import config
 from core.errors import SwimVisionError
-from core.models import DISTANCES, POOLS, STROKE_SUPPORT, RaceInfo
+from core.models import POOLS, STROKES, RaceInfo, distance_unit_for_pool, distances_for
 from core.video import (
     VideoMetadata,
     frame_to_timestamp,
@@ -41,11 +41,6 @@ class UploadState:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _stroke_label(stroke: str) -> str:
-    level = STROKE_SUPPORT[stroke]
-    return f"{stroke}  ·  fully supported" if level == "supported" else f"{stroke}  ·  experimental (coming later)"
-
-
 def _discard_files(state: UploadState | None) -> None:
     """Delete the stored upload (and its preview) if it was never saved."""
     if state is None or state.saved_analysis_id or state.path is None:
@@ -97,16 +92,22 @@ def _sync_state_with_uploader(uploaded: Any) -> UploadState | None:
 # ---------------------------------------------------------------------------
 def _render_race_form() -> RaceInfo:
     step_label("Step 1 · Race details")
-    col_stroke, col_dist, col_pool = st.columns([2, 1, 2])
-    stroke = col_stroke.selectbox("Stroke", list(STROKE_SUPPORT), format_func=_stroke_label)
-    distance = col_dist.selectbox("Distance", DISTANCES, index=1)
+    col_stroke, col_pool, col_dist = st.columns([2, 2, 1])
+    stroke = col_stroke.selectbox("Stroke", STROKES)
     pool = col_pool.selectbox("Pool", list(POOLS), format_func=lambda p: POOLS[p][0])
+    options = distances_for(stroke, pool)
+    unit = distance_unit_for_pool(pool)
+    distance = col_dist.selectbox("Distance", options, index=options.index(50) if 50 in options else 0,
+                                  format_func=lambda d: f"{d} {unit}")
     race = RaceInfo(stroke=stroke, distance=int(distance), pool=pool)
-    if race.support_level != "supported":
-        st.warning(
-            f"{stroke} analysis is experimental and not implemented yet. "
-            "SwimVision V1 is being built and validated for freestyle first."
-        )
+    legs = " → ".join(f"{d} {s}" for s, d in race.im_segments)
+    st.caption(f"{race.lengths} length{'s' if race.lengths > 1 else ''} · {race.turns} turn"
+               f"{'s' if race.turns != 1 else ''}" + (f" · {legs}" if legs else ""))
+    st.info("What SwimVision measures today, for every stroke: where your swimmer is in each frame "
+            "(tracking). Stroke count, stroke rate, turns and splits are not built yet.")
+    if race.lengths > 2:
+        st.info("Longer races are accepted, but today SwimVision only tracks the swimmer, and SAM 2 often "
+                "loses them at turns. Tracking time on a GPU is roughly 2x the video length.")
     return race
 
 
@@ -182,7 +183,7 @@ def render_upload_page() -> None:
     st.write("")
     step_label("Step 2 · Upload race video")
     uploaded = st.file_uploader(
-        "Upload a side-view freestyle race video",
+        "Upload a side-view race video",
         type=list(config.SUPPORTED_VIDEO_EXTENSIONS),
         help="Videos are processed locally on this computer and are not sent anywhere.",
     )

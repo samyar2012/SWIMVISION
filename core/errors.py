@@ -21,12 +21,8 @@ class VideoDecodeError(SwimVisionError):
 
 
 class ModelLoadError(SwimVisionError):
-    """A pretrained model (YOLO weights, tracker model) could not be loaded."""
-
-
-class NoPersonDetectedError(SwimVisionError):
-    """No person was found in the chosen frame."""
+    """The SAM 2 weights could not be found, downloaded or loaded."""
 
 
 class TrackingError(SwimVisionError):
-    """The selected swimmer could not be tracked at all."""
+    """Tracking could not start or produced output that fails a sanity check."""

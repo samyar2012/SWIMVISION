@@ -253,6 +253,25 @@ def build_preview_command(ffmpeg_exe: str, src: Path, dst: Path) -> list[str]:
     ]
 
 
+def open_h264_writer(path: str | Path, width: int, height: int, fps: float) -> Any:
+    """Start an FFmpeg H.264 / yuv420p MP4 writer (browser-playable).
+
+    Returns an ``imageio_ffmpeg`` generator: call ``.send(bgr_frame)`` for each
+    frame and ``.close()`` at the end. ``width`` and ``height`` must be even.
+    """
+    import imageio_ffmpeg
+
+    if width % 2 or height % 2:
+        raise ValueError(f"H.264 needs even dimensions, got {width}x{height}")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    writer = imageio_ffmpeg.write_frames(
+        str(path), (width, height), pix_fmt_in="bgr24", pix_fmt_out="yuv420p", fps=fps,
+        codec="libx264", quality=None, macro_block_size=2,
+        output_params=["-crf", "22", "-preset", "veryfast", "-movflags", "+faststart"])
+    writer.send(None)  # start the FFmpeg process
+    return writer
+
+
 def make_browser_preview(src: str | Path, dst: str | Path, timeout_s: int = 600) -> Path:
     """Re-encode ``src`` to an H.264 MP4 at ``dst`` using a bundled FFmpeg.
 

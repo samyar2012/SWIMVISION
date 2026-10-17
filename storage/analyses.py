@@ -1,8 +1,7 @@
 """Save and load analyses as small JSON files in ``data/analyses/``.
 
 JSON was chosen over SQLite for now because each analysis is one self-contained
-document that is easy to open, read and debug. Later phases will add keys such
-as ``tracking``, ``strokes`` and ``events`` to the same record.
+document that is easy to open, read and debug.
 
 Privacy: only measurements and a *relative path* to the video are stored. The
 video itself stays in the local ``uploads/`` folder.
@@ -21,7 +20,7 @@ import pandas as pd
 
 import config
 from core.models import RaceInfo
-from core.tracker import SwimmerSelection, TrackingSummary
+from core.sam2_tracking import Selection, TrackingRun
 from core.video import VideoMetadata
 
 
@@ -41,9 +40,8 @@ class AnalysisRecord:
     video: VideoMetadata
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # --- Phase 2: filled in after the user picks a swimmer and tracking runs ---
-    selection: SwimmerSelection | None = None
-    checkpoints: list[SwimmerSelection] = field(default_factory=list)  # all user boxes, incl. selection
-    tracking: TrackingSummary | None = None
+    selections: list[Selection] = field(default_factory=list)  # the user's marks, sorted by frame
+    tracking: TrackingRun | None = None
     tracking_csv: str | None = None        # relative path to the per-frame table
     annotated_video: str | None = None     # relative path to the overlay video
 
@@ -55,8 +53,7 @@ class AnalysisRecord:
             "video_path": self.video_path,
             "race": self.race.to_dict(),
             "video": self.video.to_dict(),
-            "selection": self.selection.to_dict() if self.selection else None,
-            "checkpoints": [c.to_dict() for c in self.checkpoints],
+            "selections": [s.to_dict() for s in self.selections],
             "tracking": self.tracking.to_dict() if self.tracking else None,
             "tracking_csv": self.tracking_csv,
             "annotated_video": self.annotated_video,
@@ -64,6 +61,9 @@ class AnalysisRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AnalysisRecord":
+        # Tracking saved by the old (removed) tracking code is ignored: the user re-runs it.
+        tracking = TrackingRun.from_dict(data["tracking"]) if data.get("tracking") else None
+        marks = data.get("selections") or ([data["selection"]] if data.get("selection") else [])
         return cls(
             analysis_id=data["analysis_id"],
             original_filename=data["original_filename"],
@@ -71,12 +71,10 @@ class AnalysisRecord:
             race=RaceInfo.from_dict(data["race"]),
             video=VideoMetadata.from_dict(data["video"]),
             created_at=data["created_at"],
-            # .get(): records saved by Phase 1 do not have these keys yet.
-            selection=SwimmerSelection.from_dict(data["selection"]) if data.get("selection") else None,
-            checkpoints=[SwimmerSelection.from_dict(c) for c in data.get("checkpoints", [])],
-            tracking=TrackingSummary.from_dict(data["tracking"]) if data.get("tracking") else None,
-            tracking_csv=data.get("tracking_csv"),
-            annotated_video=data.get("annotated_video"),
+            selections=sorted((Selection.from_dict(m) for m in marks), key=lambda s: s.frame_index),
+            tracking=tracking,
+            tracking_csv=data.get("tracking_csv") if tracking else None,
+            annotated_video=data.get("annotated_video") if tracking else None,
         )
 
     def absolute_video_path(self) -> Path:

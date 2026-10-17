@@ -1,268 +1,131 @@
-"""Swimmer selection (Step 4): mark the swimmer with one or more checkpoints, run tracking.
+"""Step 1: mark the swimmer - drag a rectangle around them on one or more frames.
 
-The app never assumes who the swimmer is. The user draws a box around their
-swimmer on a frame - a *checkpoint*. More checkpoints (after the dive, after
-each turn) let tracking recover wherever the swimmer was hidden underwater:
-nothing in the picture shows where a submerged swimmer is, so the user points
-them out again when they resurface.
+Uses ``streamlit-cropper``: a canvas with a visible rectangle the user can move
+and resize. We resize the frame ourselves (``should_resize_image=False``) so
+the display size is known exactly, and convert the rectangle back to original
+video pixels with ``core.geometry.cropper_rect_to_box``.
 
-Optionally, a person detector can propose numbered boxes, but on pool footage
-those are mostly spectators (it was trained on people on land).
+After the user moves the rectangle the component reports fabric.js'
+``getBoundingRect()``, which includes the outline width; a 1 px outline keeps
+that error at <= 1 display pixel.
 """
 
 from __future__ import annotations
 
-import logging
-
 import cv2
+import numpy as np
 import streamlit as st
+from PIL import Image
+from streamlit_cropper import st_cropper
 
 import config
-from core.detector import PersonDetection, compute_device_name, detect_people, load_yolo
-from core.errors import NoPersonDetectedError, SwimVisionError
-from core.geometry import BBox, box_from_drag
-from core.overlay import draw_manual_box, draw_person_candidates, zoomed_crop
-from core.tracker import SwimmerSelection
-from core.video import analysis_stride, frame_to_timestamp, read_frame
-from storage.analyses import AnalysisRecord
-from ui.jobs import start_job
+from core.errors import SwimVisionError
+from core.geometry import BBox, box_to_cropper_coords, cropper_rect_to_box, display_size
+from core.overlay import zoomed_crop
+from core.sam2_tracking import Selection
+from core.video import frame_to_timestamp, read_frame
+from storage.analyses import AnalysisRecord, save_analysis
 from ui.styles import step_label
 
-try:  # optional drawing component; the app falls back to sliders without it
-    from streamlit_image_coordinates import streamlit_image_coordinates
-except ImportError:  # pragma: no cover
-    streamlit_image_coordinates = None
 
-logger = logging.getLogger(__name__)
-
-MANUAL_CHOICE = "manual"
-METHOD_LABELS = {
-    "sam2": "Segment Anything 2 - follows the swimmer's outline from your checkpoints (recommended)",
-    "auto": "YOLO person detector + tracker (rarely sees swimmers in the water)",
-    "visual": "Simple box tracker (fast, but loses the swimmer at the dive)",
-}
-CHECKPOINT_TIP = (
-    "**Where to put checkpoints:** one on your swimmer on the block, one when they come up after the dive, "
-    "and one after each turn. Underwater the swimmer cannot be seen by anyone - including the AI - so it "
-    "needs you to point them out again when they resurface. Draw each box tightly around the swimmer."
-)
+def _rgb(frame: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
-@st.cache_resource(show_spinner="Loading detection model…")
-def _cached_detector(model_name: str):
-    """Keep the detection model in memory between Streamlit reruns."""
-    return load_yolo(model_name)
+def _box_text(box: BBox) -> str:
+    x1, y1, x2, y2 = box.to_int_list()
+    return f"x1 = {x1}  y1 = {y1}  x2 = {x2}  y2 = {y2}"
 
 
-def _render_settings() -> dict:
-    """Advanced options with sensible defaults. Returns the chosen values."""
-    with st.expander("Advanced tracking settings"):
-        method = st.radio("Tracking method", list(METHOD_LABELS), format_func=METHOD_LABELS.get)
-        if method != "sam2":
-            st.caption("This method uses only your earliest checkpoint.")
-        c1, c2 = st.columns(2)
-        model = c1.selectbox("Person detector model", config.YOLO_MODEL_CHOICES,
-                             index=config.YOLO_MODEL_CHOICES.index(config.DEFAULT_YOLO_MODEL),
-                             help="Used by 'Find people in this frame' and the YOLO method.")
-        conf = c2.slider("Minimum detection confidence", 0.05, 0.90, 0.25, 0.05,
-                         help="Lower finds more (including false) detections.")
-        imgsz = c1.selectbox("Detection image size", (640, 960, 1280), index=1,
-                             help="Bigger helps find small/far people but is slower.")
-        tracker = c2.selectbox("YOLO tracker", ("bytetrack.yaml", "botsort.yaml"),
-                               help="BoT-SORT also compensates for camera movement.")
-        st.caption(f"Compute device: {compute_device_name()}")
-    return {"method": method, "model_name": model, "conf": conf, "imgsz": imgsz, "tracker_name": tracker}
+def _starting_box(record: AnalysisRecord, frame_idx: int) -> BBox:
+    """Where the rectangle starts: this frame's mark, else the nearest mark's box, else a small centred box."""
+    if record.selections:
+        return min(record.selections, key=lambda m: abs(m.frame_index - frame_idx)).box
+    w, h = record.video.width, record.video.height
+    return BBox(w * 0.45, h * 0.40, w * 0.55, h * 0.60)
 
 
-def _last_sample_frame(frame_count: int, stride: int) -> int:
-    return ((frame_count - 1) // stride) * stride
-
-
-# ---------------------------------------------------------------------------
-# Checkpoints live in st.session_state as {frame_index: {"box": [...], "source": ..., "confidence": ...}}
-# ---------------------------------------------------------------------------
-def _checkpoints(record: AnalysisRecord) -> dict[int, dict]:
-    key = f"{record.analysis_id}_checkpoints"
-    if key not in st.session_state:  # start from what was saved last time
-        saved = record.checkpoints or ([record.selection] if record.selection else [])
-        st.session_state[key] = {c.anchor_frame: {"box": c.bbox.to_list(), "source": c.source,
-                                                  "confidence": c.confidence} for c in saved}
-    return st.session_state[key]
-
-
-def _as_selections(checkpoints: dict[int, dict]) -> list[SwimmerSelection]:
-    return [SwimmerSelection(f, BBox.from_list(c["box"]), c["source"], c.get("confidence"))
-            for f, c in sorted(checkpoints.items())]
-
-
-def _render_checkpoint_list(record: AnalysisRecord, checkpoints: dict[int, dict], frame_key: str) -> None:
-    """List the checkpoints with 'go to' and 'remove' buttons."""
-    if not checkpoints:
-        st.info("No checkpoints yet. Draw a box around your swimmer on the frame above.")
-        return
-    st.markdown(f"**Checkpoints ({len(checkpoints)})**")
-    for f in sorted(checkpoints):
-        c1, c2, c3 = st.columns([4, 1, 1])
-        c1.write(f"t = {frame_to_timestamp(f, record.video.fps):.2f} s  (frame {f}) - "
-                 f"{'drawn by you' if checkpoints[f]['source'] == 'manual' else 'detected person'}")
-        c2.button("Go to", key=f"{frame_key}_goto_{f}", on_click=st.session_state.__setitem__,
-                  args=(frame_key, f))
-        if c3.button("Remove", key=f"{frame_key}_rm_{f}"):
-            checkpoints.pop(f, None)
-            st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# Optional person detection
-# ---------------------------------------------------------------------------
-def _detect_for_frame(video_path, frame_idx: int, settings: dict) -> list[PersonDetection]:
-    frame = read_frame(video_path, frame_idx)
-    detections = detect_people(_cached_detector(settings["model_name"]), frame,
-                               settings["conf"], settings["imgsz"])
-    if not detections:
-        raise NoPersonDetectedError(
-            "No people were detected on this frame. Draw a box around your swimmer instead.")
-    return detections
-
-
-def _choose_person(record: AnalysisRecord, frame_idx: int, settings: dict):
-    """Returns ``(detections, choice)``; ``choice`` is a person number or ``MANUAL_CHOICE``."""
-    key = f"{record.analysis_id}_det"
-    det_key = (frame_idx, settings["model_name"], settings["conf"], settings["imgsz"])
-
-    if st.button("Find people in this frame (optional)", key=f"{key}_btn"):
-        try:
-            with st.spinner("Detecting people…"):
-                st.session_state[key] = {"key": det_key,
-                                         "detections": _detect_for_frame(record.absolute_video_path(), frame_idx, settings)}
-        except NoPersonDetectedError as exc:
-            st.session_state[key] = {"key": det_key, "detections": []}
-            st.warning(str(exc))
-        except SwimVisionError as exc:
-            st.error(str(exc))
-
-    stored = st.session_state.get(key)
-    detections: list[PersonDetection] = stored["detections"] if stored and stored["key"] == det_key else []
-    if not detections:
-        return [], MANUAL_CHOICE
-    # Drawing the box yourself stays first: the person detector was trained on people on land
-    # and, on pool footage, mostly finds spectators rather than swimmers.
-    options: list = [MANUAL_CHOICE] + [d.number for d in detections]
-    labels = {d.number: f"Person {d.number}  ({d.confidence:.0%})" for d in detections}
-    labels[MANUAL_CHOICE] = "Draw the box myself (recommended)"
-    st.info(f"{len(detections)} people detected. In pool footage these are often spectators or officials, "
-            "not swimmers. If your swimmer has no box, draw one yourself.")
-    choice = st.radio("How do you want to mark your swimmer on this frame?", options, index=0,
-                      horizontal=True, format_func=labels.get, key=f"{key}_choice_{frame_idx}")
-    return detections, choice
-
-
-# ---------------------------------------------------------------------------
-# Drawing a box
-# ---------------------------------------------------------------------------
-def _manual_box_sliders(frame_w: int, frame_h: int, key: str) -> BBox | None:
-    """Fallback when the drawing component is unavailable: two range sliders."""
-    st.caption("Drag the sliders until the box tightly surrounds your swimmer.")
-    c1, c2 = st.columns(2)
-    xr = c1.slider("Left ↔ right edge (pixels)", 0, frame_w, (int(frame_w * 0.35), int(frame_w * 0.65)), key=f"{key}_x")
-    yr = c2.slider("Top ↕ bottom edge (pixels)", 0, frame_h, (int(frame_h * 0.35), int(frame_h * 0.65)), key=f"{key}_y")
-    box = BBox(xr[0], yr[0], xr[1], yr[1])
-    return box if box.width >= 8 and box.height >= 8 else None
-
-
-def _draw_box_on_frame(frame, detections: list[PersonDetection], frame_idx: int,
-                       checkpoints: dict[int, dict], key: str) -> None:
-    """Let the user drag a rectangle on the frame; a new drag replaces this frame's checkpoint.
-
-    ``streamlit-image-coordinates`` reports where the mouse was pressed and
-    released (in displayed pixels); ``box_from_drag`` converts that to frame
-    pixels. The component returns the same value on every rerun, so the last
-    handled drag is remembered and only a *new* drag changes the checkpoint.
-    """
-    h, w = frame.shape[:2]
-    existing = checkpoints.get(frame_idx)
-    shown = draw_person_candidates(frame, detections) if detections else frame
-    if existing:
-        shown = draw_manual_box(shown, BBox.from_list(existing["box"]))
-    st.caption("Press the mouse on one corner of your swimmer, drag to the opposite corner and release. "
-               "Drag again to redraw.")
-    drag = streamlit_image_coordinates(cv2.cvtColor(shown, cv2.COLOR_BGR2RGB), key=f"{key}_drag_{frame_idx}",
-                                       click_and_drag=True, use_column_width="always", cursor="crosshair")
-    seen_key = f"{key}_last_drag"
-    if drag:
-        stamp = (frame_idx, drag.get("x1"), drag.get("y1"), drag.get("x2"), drag.get("y2"))
-        if st.session_state.get(seen_key) != stamp:  # a new drag, not a rerun of an old one
-            st.session_state[seen_key] = stamp
-            box = box_from_drag(drag, w, h)
-            if box is None:
-                st.warning("That box was too small. Press, drag across the swimmer and release.")
-            else:
-                checkpoints[frame_idx] = {"box": box.to_list(), "source": "manual", "confidence": None}
-                st.rerun()  # redraw the image with the new box
-
-
-def _render_marking(record: AnalysisRecord, frame, frame_idx: int, settings: dict,
-                    checkpoints: dict[int, dict]) -> None:
-    """Everything needed to set (or change) the checkpoint on the current frame."""
-    detections, choice = _choose_person(record, frame_idx, settings)
-    key = f"{record.analysis_id}_manual"
-    if choice != MANUAL_CHOICE:
-        picked = next((d for d in detections if d.number == choice), None)
-        if picked is not None:
-            checkpoints[frame_idx] = {"box": picked.bbox.to_list(), "source": "detected",
-                                      "confidence": picked.confidence}
-        st.image(cv2.cvtColor(draw_person_candidates(frame, detections, choice), cv2.COLOR_BGR2RGB),
-                 width="stretch")
-    elif streamlit_image_coordinates is not None:
-        _draw_box_on_frame(frame, detections, frame_idx, checkpoints, key)
-    else:  # component missing: slider fallback with a normal preview image
-        box = _manual_box_sliders(frame.shape[1], frame.shape[0], key)
-        if box is not None:
-            st.image(cv2.cvtColor(draw_manual_box(frame, box), cv2.COLOR_BGR2RGB), width="stretch")
-            if st.button("Set this box as the checkpoint for this frame", key=f"{key}_set"):
-                checkpoints[frame_idx] = {"box": box.to_list(), "source": "manual", "confidence": None}
-
-    current = checkpoints.get(frame_idx)
-    if current:
-        box = BBox.from_list(current["box"])
-        c1, c2 = st.columns([3, 2])
-        c1.image(cv2.cvtColor(zoomed_crop(frame, box), cv2.COLOR_BGR2RGB),
-                 caption=f"Zoomed view of this checkpoint ({box.width:.0f} × {box.height:.0f} px) - "
-                         "it should contain the whole swimmer and little else.")
-        c2.success(f"Checkpoint set at t = {frame_to_timestamp(frame_idx, record.video.fps):.2f} s.")
+def _set_mark(record: AnalysisRecord, mark: Selection) -> None:
+    """Add ``mark``, replacing any mark already on the same frame."""
+    others = [m for m in record.selections if m.frame_index != mark.frame_index]
+    record.selections = sorted([*others, mark], key=lambda m: m.frame_index)
+    save_analysis(record)
 
 
 def render_selection(record: AnalysisRecord) -> None:
-    """The full selection UI. Runs tracking when the user confirms."""
-    meta, path = record.video, record.absolute_video_path()
-    if not path.is_file():
-        st.error("The original video file is no longer in the uploads folder, so it cannot be analysed. "
-                 "Please upload it again.")
-        return
-    stride = analysis_stride(meta.fps)
-    step_label("Step 4 · Mark your swimmer")
-    st.markdown(CHECKPOINT_TIP)
+    """Frame slider + rectangle tool + zoomed check + the list of marks."""
+    meta = record.video
+    step_label("Step 1 · Mark your swimmer")
+    st.markdown(
+        "1. Scrub to a frame where your swimmer is clearly visible (e.g. on the block), draw the box, "
+        "click **Mark swimmer on this frame**.\n"
+        "2. **Scrub to just after the dive, when the swimmer first shows in the water, and mark them "
+        "again.** Without this second mark SAM 2 loses the swimmer at water entry; with it, tracking "
+        "runs backward from that mark through the dive and forward from it into the race.\n"
+        "3. Add more marks wherever the swimmer is lost later (e.g. after a turn).")
 
-    checkpoints = _checkpoints(record)
-    last = _last_sample_frame(meta.frame_count, stride)
-    frame_key = f"{record.analysis_id}_frame"
-    if frame_key not in st.session_state:
-        st.session_state[frame_key] = min(checkpoints) if checkpoints else \
-            min(last, int(round(meta.frame_count * 0.15 / stride)) * stride)
-    frame_idx = st.slider("Frame", 0, last, step=stride, key=frame_key) if last > 0 else 0
-    st.caption(f"t = {frame_to_timestamp(frame_idx, meta.fps):.2f} s  ·  analysis uses every {stride} frame(s) "
-               f"- about {meta.fps / stride:.0f} analysed frames per second.")
-    settings = _render_settings()
+    last = meta.frame_count - 1
+    start = record.selections[0].frame_index if record.selections else 0
+    col_slider, col_size = st.columns([4, 1])
+    frame_idx = col_slider.slider("Frame", 0, max(last, 1), min(start, last),
+                                  key=f"sel_frame_{record.analysis_id}") if last > 0 else 0
+    size_label = col_size.radio("Image size", list(config.SELECTION_DISPLAY_WIDTHS),
+                                key=f"sel_size_{record.analysis_id}")
+    st.caption(f"Frame {frame_idx} · t = {frame_to_timestamp(frame_idx, meta.fps):.3f} s · "
+               "use the arrow keys on the slider for single frames")
 
     try:
-        frame = read_frame(path, frame_idx)
+        frame = read_frame(record.absolute_video_path(), frame_idx)
     except SwimVisionError as exc:
         st.error(str(exc))
         return
-    _render_marking(record, frame, frame_idx, settings, checkpoints)
-    _render_checkpoint_list(record, checkpoints, frame_key)
 
-    if st.button("Analyze this swimmer", type="primary", disabled=not checkpoints,
-                 key=f"{record.analysis_id}_go"):
-        start_job(record, _as_selections(checkpoints), settings, stride)
-        st.rerun()  # the workspace now shows the live progress view
+    dw, dh = display_size(meta.width, meta.height, config.SELECTION_DISPLAY_WIDTHS[size_label])
+    interp = cv2.INTER_AREA if dw < meta.width else cv2.INTER_CUBIC
+    shown = Image.fromarray(_rgb(cv2.resize(frame, (dw, dh), interpolation=interp)))
+    st.markdown("**Drag the yellow rectangle onto your swimmer; drag its corners to resize it.**")
+    rect = st_cropper(
+        shown, realtime_update=True, box_color="#FFC800", return_type="box", should_resize_image=False,
+        default_coords=box_to_cropper_coords(_starting_box(record, frame_idx), dw, dh, meta.width, meta.height),
+        key=f"cropper_{record.analysis_id}_{frame_idx}_{dw}", stroke_width=1,
+    )
+    box = cropper_rect_to_box(rect, dw, dh, meta.width, meta.height)
+    if box is None:
+        st.warning("The rectangle is too small. Make it cover the whole swimmer.")
+    else:
+        st.code(f"Selected box: {_box_text(box)}   (original video pixels, frame {frame_idx}, "
+                f"video {meta.width}x{meta.height})", language=None)
+        col_zoom, col_button = st.columns([3, 2])
+        col_zoom.image(_rgb(zoomed_crop(frame, box)), caption="Zoomed check: is the whole swimmer inside the box?")
+        on_frame = any(m.frame_index == frame_idx for m in record.selections)
+        label = "Update the mark on this frame" if on_frame else "Mark swimmer on this frame"
+        if col_button.button(label, type="primary", width="stretch"):
+            _set_mark(record, Selection(frame_idx, box))
+            st.rerun()
+    _render_marks(record)
+
+
+def _render_marks(record: AnalysisRecord) -> None:
+    """List every mark with a zoomed check and a remove button."""
+    if not record.selections:
+        st.info("No marks yet. Draw the box and click **Mark swimmer on this frame**.")
+        return
+    st.markdown(f"##### Marks ({len(record.selections)}) - tracking uses these")
+    cols = st.columns(min(len(record.selections), 4))
+    for n, mark in enumerate(record.selections):
+        with cols[n % len(cols)]:
+            t = frame_to_timestamp(mark.frame_index, record.video.fps)
+            try:
+                crop = zoomed_crop(read_frame(record.absolute_video_path(), mark.frame_index), mark.box,
+                                   target_height=160, max_width=320)
+                st.image(_rgb(crop))
+            except SwimVisionError as exc:
+                st.error(str(exc))
+            st.caption(f"Mark {n + 1} · frame {mark.frame_index} · t = {t:.2f} s\n\n{_box_text(mark.box)}")
+            if st.button("Remove", key=f"rm_mark_{record.analysis_id}_{mark.frame_index}"):
+                record.selections = [m for m in record.selections if m.frame_index != mark.frame_index]
+                save_analysis(record)
+                st.rerun()
+    if len(record.selections) == 1:
+        st.warning("Only one mark. If the race starts with a dive, add a second mark just after the "
+                   "swimmer surfaces, or tracking will most likely stop at water entry.")

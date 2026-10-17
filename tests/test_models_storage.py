@@ -14,15 +14,53 @@ def test_race_label_uses_pool_units():
     assert RaceInfo("Freestyle", 50, "LCM").label == "50 m Freestyle (LCM)"
 
 
-def test_race_support_level():
-    assert RaceInfo("Freestyle", 25, "SCY").support_level == "supported"
-    assert RaceInfo("Butterfly", 25, "SCY").support_level == "experimental"
+def test_all_strokes_accepted():
+    from core.models import STROKES
+    for stroke in STROKES:
+        assert RaceInfo(stroke, 200, "SCY").stroke == stroke
 
 
-@pytest.mark.parametrize("args", [("Dolphin", 50, "SCY"), ("Freestyle", 75, "SCY"), ("Freestyle", 50, "XYZ")])
+@pytest.mark.parametrize("args", [
+    ("Dolphin", 50, "SCY"), ("Freestyle", 75, "SCY"), ("Freestyle", 50, "XYZ"),
+    ("Freestyle", 25, "LCM"),            # a 50 m pool has no 25 events
+    ("Individual Medley", 100, "LCM"),   # 100 IM is short course only
+    ("Individual Medley", 50, "SCY"),
+    ("Freestyle", 1650, "SCM"),          # 1650 is a yards event
+    ("Freestyle", 1500, "SCY"),
+    ("Butterfly", 400, "SCY"),
+])
 def test_invalid_race_values_rejected(args):
     with pytest.raises(ValueError):
         RaceInfo(*args)
+
+
+def test_every_listed_event_is_valid():
+    from core.models import EVENTS
+    count = 0
+    for pool, strokes in EVENTS.items():
+        for stroke, distances in strokes.items():
+            for d in distances:
+                race = RaceInfo(stroke, d, pool)
+                assert race.lengths * race.pool_length == d
+                count += 1
+    assert count > 50
+
+
+@pytest.mark.parametrize("stroke, distance, pool, lengths, turns", [
+    ("Freestyle", 50, "SCY", 2, 1), ("Freestyle", 1650, "SCY", 66, 65),
+    ("Freestyle", 1500, "LCM", 30, 29), ("Freestyle", 50, "LCM", 1, 0),
+    ("Individual Medley", 200, "SCM", 8, 7),
+])
+def test_lengths_and_turns(stroke, distance, pool, lengths, turns):
+    race = RaceInfo(stroke, distance, pool)
+    assert (race.lengths, race.turns) == (lengths, turns)
+
+
+def test_im_segments_follow_medley_order():
+    assert RaceInfo("Individual Medley", 400, "LCM").im_segments == (
+        ("Butterfly", 100), ("Backstroke", 100), ("Breaststroke", 100), ("Freestyle", 100))
+    assert RaceInfo("Freestyle", 200, "SCY").im_segments == ()
+    assert RaceInfo("Individual Medley", 100, "SCY").label == "100 yd Individual Medley (SCY)"
 
 
 def _record() -> AnalysisRecord:
@@ -46,24 +84,62 @@ def test_phase1_records_without_tracking_still_load(tmp_path):
     import json
     rec = _record()
     data = rec.to_dict()
-    for key in ("selection", "checkpoints", "tracking", "tracking_csv", "annotated_video"):
+    for key in ("selections", "tracking", "tracking_csv", "annotated_video"):
         data.pop(key)
     (tmp_path / f"{rec.analysis_id}.json").write_text(json.dumps(data))
     loaded = load_analysis(rec.analysis_id, tmp_path)
-    assert loaded.selection is None and loaded.tracking is None and loaded.checkpoints == []
+    assert loaded.selections == [] and loaded.tracking is None
+
+
+def test_old_tracking_format_is_dropped_but_old_box_is_kept(tmp_path):
+    """Records from the removed tracking code keep the user's box; their old results are ignored."""
+    import json
+    rec = _record()
+    data = rec.to_dict()
+    data["selection"] = {"anchor_frame": 430, "bbox": [330, 133, 399, 278], "source": "manual", "confidence": None}
+    data["tracking"] = {"mode": "sam2", "n_samples": 10}
+    data["tracking_csv"] = "data/tracking/old.csv"
+    data["annotated_video"] = "outputs/annotated/old.mp4"
+    (tmp_path / f"{rec.analysis_id}.json").write_text(json.dumps(data))
+    loaded = load_analysis(rec.analysis_id, tmp_path)
+    assert [m.frame_index for m in loaded.selections] == [430]
+    assert loaded.selections[0].box.to_list() == [330, 133, 399, 278]
+    assert loaded.tracking is None and loaded.tracking_csv is None and loaded.annotated_video is None
+
+
+def test_single_mark_tracking_record_still_loads(tmp_path):
+    """Version-2 records (one 'selection') from earlier today become one mark."""
+    import json
+    from core.geometry import BBox
+    from core.sam2_tracking import FrameResult, compute_stats
+    rec = _record()
+    data = rec.to_dict()
+    data.pop("selections")
+    data["selection"] = {"frame_index": 5, "box": [1, 2, 30, 40]}
+    stats = compute_stats([FrameResult(5, 0.1, BBox(1, 2, 30, 40), 9)], 1 / 30).to_dict()
+    stats.pop("conflict_frames")
+    data["tracking"] = {"version": 2, "selection": data["selection"], "start_frame": 5, "end_frame": 5,
+                        "stride": 1, "analysis_width": 640, "analysis_height": 360, "model": "m", "device": "cpu",
+                        "half_precision": False, "runtime_s": 1.0, "stats": stats, "output_video": {},
+                        "debug_dir": None}
+    (tmp_path / f"{rec.analysis_id}.json").write_text(json.dumps(data))
+    loaded = load_analysis(rec.analysis_id, tmp_path)
+    assert [m.frame_index for m in loaded.selections] == [5]
+    assert loaded.tracking.selections[0].frame_index == 5 and loaded.tracking.stats.conflict_frames == 0
 
 
 def test_record_with_tracking_round_trips(tmp_path):
     from core.geometry import BBox
-    from core.tracker import (STATUS_TRACKED, SwimmerSelection, TrackingResult, build_observations,
-                              FollowResult, summarize_tracking)
+    from core.sam2_tracking import FrameResult, Selection, TrackingRun, compute_stats
     rec = _record()
-    rec.selection = SwimmerSelection(10, BBox(1, 2, 3, 4), "manual")
-    rec.checkpoints = [rec.selection, SwimmerSelection(40, BBox(5, 6, 9, 9), "manual")]
-    obs = build_observations([0, 1], 30.0, [FollowResult(1, BBox(0, 0, 5, 5), 0.9), None])
-    assert obs[0].status == STATUS_TRACKED
-    rec.tracking = summarize_tracking(TrackingResult(obs, "visual_tracker", 1, ["n"], 0.5, {"a": 1}))
+    rec.selections = [Selection(10, BBox(1, 2, 30, 40)), Selection(20, BBox(5, 6, 30, 40))]
+    results = [FrameResult(10, 0.33, BBox(1, 2, 30, 40), 500), FrameResult(11, 0.37, None, 0)]
+    rec.tracking = TrackingRun(
+        selections=tuple(rec.selections), start_frame=10, end_frame=11, stride=1, analysis_width=640,
+        analysis_height=360, model="sam2.1_b.pt", device="cpu", half_precision=False, runtime_s=1.5,
+        stats=compute_stats(results, 1 / 30), output_video={"frames": 2, "codec": "h264"}, debug_dir=None)
     rec.tracking_csv = "data/tracking/x.csv"
+    rec.annotated_video = "outputs/annotated/x.mp4"
     save_analysis(rec, tmp_path)
     assert load_analysis(rec.analysis_id, tmp_path) == rec
 
