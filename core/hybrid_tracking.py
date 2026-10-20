@@ -139,12 +139,12 @@ def track_swimmer(
                 candidates = detector.detect(frame)
                 if not tracker.initialized:
                     tracked = (
-                        tracker.start(candidates, (ah, aw), target_box=selected_box)
+                        tracker.start(candidates, (ah, aw), target_box=selected_box, frame=frame)
                         if candidates
-                        else tracker.start_from_box(selected_box, (ah, aw))
+                        else tracker.start_from_box(selected_box, (ah, aw), frame=frame)
                     )
                 else:
-                    tracked = tracker.update(candidates, (ah, aw))
+                    tracked = tracker.update(candidates, (ah, aw), frame=frame)
             except Exception as exc:
                 raise TrackingError(
                     f"Tracking failed at {frame_to_timestamp(frame_index, meta.fps):.2f} seconds: "

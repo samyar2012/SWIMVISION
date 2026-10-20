@@ -115,8 +115,11 @@ def test_stops_displaying_stale_prediction_but_can_reacquire() -> None:
 
     assert tracker.update([], FRAME_SHAPE) is not None
     assert tracker.update([], FRAME_SHAPE) is None
-    reacquired = tracker.update([Detection(105, 200, 165, 250)], FRAME_SHAPE)
+    candidate = Detection(105, 200, 165, 250)
+    pending = tracker.update([candidate], FRAME_SHAPE)
+    reacquired = tracker.update([candidate], FRAME_SHAPE)
 
+    assert pending is None
     assert reacquired is not None
     assert not reacquired.predicted
     assert tracker.missed_frames == 0
@@ -132,3 +135,67 @@ def test_requires_explicit_reselection_after_identity_memory_expires() -> None:
 
     assert result is None
     assert tracker.initialized
+
+
+def _coloured_frame(boxes: list[tuple[BBox, tuple[int, int, int]]]) -> np.ndarray:
+    frame = np.full((*FRAME_SHAPE, 3), 35, dtype=np.uint8)
+    for box, colour in boxes:
+        x1, y1, x2, y2 = box.to_int_list()
+        frame[y1:y2, x1:x2] = colour
+    return frame
+
+
+def test_selected_appearance_beats_a_closer_different_swimmer() -> None:
+    initial = BBox(100, 200, 160, 250)
+    tracker = PersistentSwimmerTracker()
+    tracker.start_from_box(initial, FRAME_SHAPE, frame=_coloured_frame([(initial, (0, 0, 240))]))
+
+    wrong = Detection(105, 200, 155, 250, 0.99, "both")
+    target = Detection(165, 200, 225, 250, 0.70, "swimmer")
+    frame = _coloured_frame([
+        (BBox(wrong.x1, wrong.y1, wrong.x2, wrong.y2), (240, 0, 0)),
+        (BBox(target.x1, target.y1, target.x2, target.y2), (0, 0, 240)),
+    ])
+
+    result = tracker.update([wrong, target], FRAME_SHAPE, frame=frame)
+
+    assert result is not None and not result.predicted
+    assert result.detection is target
+
+
+def test_inferred_lane_rejects_an_adjacent_lane_without_user_input() -> None:
+    tracker = PersistentSwimmerTracker()
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE)
+
+    result = tracker.update([Detection(110, 275, 170, 325, 1.0, "both")], FRAME_SHAPE)
+
+    assert result is not None and result.predicted
+
+
+def test_reacquisition_after_a_longer_gap_requires_two_consistent_frames() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=6, reacquire_confirmations=2)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE)
+    tracker.update([], FRAME_SHAPE)
+    tracker.update([], FRAME_SHAPE)
+    candidate = Detection(110, 200, 170, 250)
+
+    first = tracker.update([candidate], FRAME_SHAPE)
+    second = tracker.update([candidate], FRAME_SHAPE)
+
+    assert first is not None and first.predicted
+    assert second is not None and not second.predicted
+
+
+def test_gap_prediction_slows_instead_of_running_past_finish_wall() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=10)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE)
+    tracker.update([Detection(110, 200, 170, 250)], FRAME_SHAPE)
+    last_observed = tracker.update([Detection(120, 200, 180, 250)], FRAME_SHAPE)
+    assert last_observed is not None
+
+    predicted = None
+    for _ in range(8):
+        predicted = tracker.update([], FRAME_SHAPE)
+
+    assert predicted is not None and predicted.predicted
+    assert predicted.center[0] - last_observed.center[0] < 55

@@ -155,10 +155,10 @@ def main() -> int:
                 continue
 
             if not tracker.initialized:
-                tracker.start_from_box(target, frame.shape[:2])
+                tracker.start_from_box(target, frame.shape[:2], frame=frame)
 
             candidates = detector.detect(frame)
-            result = tracker.update(candidates, frame.shape[:2])
+            result = tracker.update(candidates, frame.shape[:2], frame=frame)
             processed += 1
             if result is None:
                 lost += 1

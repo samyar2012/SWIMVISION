@@ -27,8 +27,8 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 ## How Phase 2 works
 
 1. **Choose.** Move a time slider until the swimmer is visible, drag the yellow box around them, and click **Use this swimmer**. The app reads the time, frame and pixel coordinates itself. This is the only manual selection.
-2. **Track.** Click **Track my swimmer**. YOLO finds people on the block and outside the water; the swimmer U-Net specializes in the in-water part. The persistent tracker ranks their combined candidates using position continuity, constant-velocity prediction, the inferred lane, detector source and confidence. Impossible jumps are rejected.
-3. **Bridge gaps.** During a short splash or underwater gap, the tracker predicts motion rather than switching to the highest-confidence person. It retains identity longer than it displays a prediction, so a plausible U-Net detection can reacquire the same swimmer.
+2. **Track.** Click **Track my swimmer**. YOLO finds people on the block and outside the water; the swimmer U-Net specializes in the in-water part. The tracker remembers the selected swimmer's visual appearance and automatically creates a hard corridor around that lane. It combines those identity signals with position, motion, detector source and confidence.
+3. **Bridge gaps.** During a short splash or underwater gap, the tracker uses a slowing motion prediction rather than switching to the highest-confidence person. After a longer gap it requires the same candidate in consecutive frames before reacquiring. If identity is uncertain, it reports searching instead of jumping to another swimmer.
 4. **Report.** The result shows followed/lost frames, every lost interval, an annotated video and a per-frame CSV. Green boxes are detector observations; yellow boxes are short predictions through a gap.
 
 Timing always comes from frame index ÷ the video's real FPS. Videos above 30 fps are analysed every *n*-th frame (60 fps -> every 2nd); timestamps stay exact.
