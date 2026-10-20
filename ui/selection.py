@@ -23,18 +23,13 @@ from core.errors import SwimVisionError
 from core.geometry import BBox, box_to_cropper_coords, cropper_rect_to_box, display_size
 from core.overlay import zoomed_crop
 from core.sam2_tracking import Selection
-from core.video import frame_to_timestamp, read_frame
+from core.video import frame_to_timestamp, read_frame, timestamp_to_frame
 from storage.analyses import AnalysisRecord, save_analysis
 from ui.styles import step_label
 
 
 def _rgb(frame: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-
-def _box_text(box: BBox) -> str:
-    x1, y1, x2, y2 = box.to_int_list()
-    return f"x1 = {x1}  y1 = {y1}  x2 = {x2}  y2 = {y2}"
 
 
 def _starting_box(record: AnalysisRecord, frame_idx: int) -> BBox:
@@ -46,33 +41,33 @@ def _starting_box(record: AnalysisRecord, frame_idx: int) -> BBox:
 
 
 def _set_mark(record: AnalysisRecord, mark: Selection) -> None:
-    """Add ``mark``, replacing any mark already on the same frame."""
-    others = [m for m in record.selections if m.frame_index != mark.frame_index]
-    record.selections = sorted([*others, mark], key=lambda m: m.frame_index)
+    """Keep the one visual selection used to initialize persistent tracking."""
+    record.selections = [mark]
+    record.tracking = None
+    record.tracking_csv = None
+    record.annotated_video = None
     save_analysis(record)
 
 
 def render_selection(record: AnalysisRecord) -> None:
     """Frame slider + rectangle tool + zoomed check + the list of marks."""
     meta = record.video
-    step_label("Step 1 · Mark your swimmer")
-    st.markdown(
-        "1. Scrub to a frame where your swimmer is clearly visible (e.g. on the block), draw the box, "
-        "click **Mark swimmer on this frame**.\n"
-        "2. **Scrub to just after the dive, when the swimmer first shows in the water, and mark them "
-        "again.** Without this second mark SAM 2 loses the swimmer at water entry; with it, tracking "
-        "runs backward from that mark through the dive and forward from it into the race.\n"
-        "3. Add more marks wherever the swimmer is lost later (e.g. after a turn).")
+    step_label("Step 1 · Choose your swimmer")
+    st.markdown("Move the slider until your swimmer is clearly visible, then drag the yellow box "
+                "around them. You only do this once—SwimVision handles the rest.")
 
     last = meta.frame_count - 1
-    start = record.selections[0].frame_index if record.selections else 0
+    start_s = frame_to_timestamp(record.selections[0].frame_index, meta.fps) if record.selections else 0.0
     col_slider, col_size = st.columns([4, 1])
-    frame_idx = col_slider.slider("Frame", 0, max(last, 1), min(start, last),
-                                  key=f"sel_frame_{record.analysis_id}") if last > 0 else 0
+    moment = col_slider.slider(
+        "Moment in video", 0.0, max(meta.duration_s - 1 / meta.fps, 0.0),
+        min(start_s, meta.duration_s), step=max(round(1 / meta.fps, 3), 0.01),
+        format="%.2f seconds", key=f"sel_moment_{record.analysis_id}",
+    ) if last > 0 else 0.0
+    frame_idx = min(last, timestamp_to_frame(moment, meta.fps))
     size_label = col_size.radio("Image size", list(config.SELECTION_DISPLAY_WIDTHS),
                                 key=f"sel_size_{record.analysis_id}")
-    st.caption(f"Frame {frame_idx} · t = {frame_to_timestamp(frame_idx, meta.fps):.3f} s · "
-               "use the arrow keys on the slider for single frames")
+    st.caption(f"Showing {frame_to_timestamp(frame_idx, meta.fps):.2f} seconds into the video")
 
     try:
         frame = read_frame(record.absolute_video_path(), frame_idx)
@@ -93,12 +88,9 @@ def render_selection(record: AnalysisRecord) -> None:
     if box is None:
         st.warning("The rectangle is too small. Make it cover the whole swimmer.")
     else:
-        st.code(f"Selected box: {_box_text(box)}   (original video pixels, frame {frame_idx}, "
-                f"video {meta.width}x{meta.height})", language=None)
         col_zoom, col_button = st.columns([3, 2])
-        col_zoom.image(_rgb(zoomed_crop(frame, box)), caption="Zoomed check: is the whole swimmer inside the box?")
-        on_frame = any(m.frame_index == frame_idx for m in record.selections)
-        label = "Update the mark on this frame" if on_frame else "Mark swimmer on this frame"
+        col_zoom.image(_rgb(zoomed_crop(frame, box)), caption="Your swimmer")
+        label = "Update chosen swimmer" if record.selections else "Use this swimmer"
         if col_button.button(label, type="primary", width="stretch"):
             _set_mark(record, Selection(frame_idx, box))
             st.rerun()
@@ -106,26 +98,10 @@ def render_selection(record: AnalysisRecord) -> None:
 
 
 def _render_marks(record: AnalysisRecord) -> None:
-    """List every mark with a zoomed check and a remove button."""
+    """Confirm that the app saved the one visual swimmer selection."""
     if not record.selections:
-        st.info("No marks yet. Draw the box and click **Mark swimmer on this frame**.")
+        st.info("Draw the yellow box around your swimmer, then click **Use this swimmer**.")
         return
-    st.markdown(f"##### Marks ({len(record.selections)}) - tracking uses these")
-    cols = st.columns(min(len(record.selections), 4))
-    for n, mark in enumerate(record.selections):
-        with cols[n % len(cols)]:
-            t = frame_to_timestamp(mark.frame_index, record.video.fps)
-            try:
-                crop = zoomed_crop(read_frame(record.absolute_video_path(), mark.frame_index), mark.box,
-                                   target_height=160, max_width=320)
-                st.image(_rgb(crop))
-            except SwimVisionError as exc:
-                st.error(str(exc))
-            st.caption(f"Mark {n + 1} · frame {mark.frame_index} · t = {t:.2f} s\n\n{_box_text(mark.box)}")
-            if st.button("Remove", key=f"rm_mark_{record.analysis_id}_{mark.frame_index}"):
-                record.selections = [m for m in record.selections if m.frame_index != mark.frame_index]
-                save_analysis(record)
-                st.rerun()
-    if len(record.selections) == 1:
-        st.warning("Only one mark. If the race starts with a dive, add a second mark just after the "
-                   "swimmer surfaces, or tracking will most likely stop at water entry.")
+    mark = record.selections[0]
+    st.success(f"Swimmer chosen at {frame_to_timestamp(mark.frame_index, record.video.fps):.2f} seconds. "
+               "No frame numbers, coordinates, or lane boundaries are needed.")

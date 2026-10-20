@@ -5,7 +5,7 @@ Developer mode (full tracebacks in the page):  set SWIMVISION_DEBUG=1 first.
 
 Page flow: with no active analysis we show the upload page; once the user
 continues (or reopens a saved analysis from the sidebar) we show that
-analysis' workspace (select swimmer -> track with SAM 2 -> result).
+analysis' workspace (visually select one swimmer -> automatic tracking -> result).
 """
 
 from __future__ import annotations

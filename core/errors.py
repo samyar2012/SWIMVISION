@@ -21,7 +21,7 @@ class VideoDecodeError(SwimVisionError):
 
 
 class ModelLoadError(SwimVisionError):
-    """The SAM 2 weights could not be found, downloaded or loaded."""
+    """Tracking model weights could not be found, downloaded or loaded."""
 
 
 class TrackingError(SwimVisionError):

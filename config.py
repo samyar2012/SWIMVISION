@@ -34,6 +34,13 @@ LOGS_DIR: Path = OUTPUTS_DIR / "logs"
 TRACKING_DIR: Path = DATA_DIR / "tracking"        # per-frame tracking tables (CSV)
 MODELS_DIR: Path = PROJECT_ROOT / "models"        # downloaded pretrained weights
 
+# --- Hybrid persistent tracker ------------------------------------------------
+PERSON_MODEL_PATH: Path = PROJECT_ROOT / "yolo26n.pt"  # Ultralytics downloads it on first use
+SWIMMER_MODEL_PATH: Path = MODELS_DIR / "colorShifts_deeper_zoomedOut_200epochs.pth"
+PERSON_CONFIDENCE: float = 0.25
+SWIMMER_THRESHOLD: float = 0.35
+MERGE_IOU_THRESHOLD: float = 0.15
+
 # --- Tracking (Phase 2): SAM 2 video segmentation, one swimmer ---------------
 SAM2_MODEL_PATH: Path = MODELS_DIR / "sam2.1_b.pt"  # Segment Anything 2.1 base, ~155 MB, auto-downloaded
 SAM2_IMGSZ: int = 1024                              # SAM 2's native input size

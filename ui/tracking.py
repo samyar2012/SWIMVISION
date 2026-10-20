@@ -1,4 +1,4 @@
-"""Steps 2 and 3: run SAM 2 tracking (synchronously) and report the result honestly."""
+"""Steps 2 and 3: run automatic hybrid tracking and show the result."""
 
 from __future__ import annotations
 
@@ -9,62 +9,54 @@ import streamlit as st
 
 import config
 from core.errors import SwimVisionError
-from core.sam2_tracking import results_table, track_swimmer
-from core.video import frame_to_timestamp, timestamp_to_frame
+from core.hybrid_tracking import load_hybrid_detector, track_swimmer
+from core.sam2_tracking import results_table
+from core.video import frame_to_timestamp
 from storage.analyses import AnalysisRecord, load_tracking_table, save_analysis, save_tracking_table
 from ui.styles import metric_card, step_label
 
 logger = logging.getLogger(__name__)
-QUICK_TEST_SECONDS = 5.0
+
+
+@st.cache_resource(show_spinner=False)
+def _detector():
+    return load_hybrid_detector()
 
 
 def render_tracking_controls(record: AnalysisRecord) -> None:
-    """Resolution + end time + "Run tracking" button."""
-    step_label("Step 2 · Track the swimmer with SAM 2")
+    """One-button persistent tracking from the visual selection to video end."""
+    step_label("Step 2 · Track your swimmer")
     marks, meta = record.selections, record.video
     if not marks:
-        st.info("Mark your swimmer first (Step 1).")
+        st.info("Choose your swimmer first (Step 1).")
         return
     last = meta.frame_count - 1
-    first_mark, last_mark = marks[0].frame_index, marks[-1].frame_index
-    if last_mark >= last:
-        st.warning("The last mark is on the last frame of the video. Remove it or mark an earlier frame.")
+    first_mark = marks[0].frame_index
+    if first_mark >= last:
+        st.warning("Choose your swimmer earlier in the video so there is something to track.")
         return
 
     start_s = frame_to_timestamp(first_mark, meta.fps)
-    first_end_s = frame_to_timestamp(last_mark + 1, meta.fps)
     last_s = frame_to_timestamp(last, meta.fps)
-    col_res, col_end = st.columns(2)
-    res_label = col_res.radio("Analysis resolution", list(config.ANALYSIS_WIDTHS), horizontal=True,
-                              key=f"res_{record.analysis_id}",
-                              help="Frames are resized to this width before tracking. Results are always "
-                                   "converted back to original video pixels.")
-    end_s = col_end.number_input(
-        "Stop at (seconds into the video)", min_value=round(first_end_s, 2), max_value=round(last_s, 2),
-        value=round(min(max(start_s + QUICK_TEST_SECONDS, first_end_s + QUICK_TEST_SECONDS), last_s), 2),
-        step=1.0, key=f"end_{record.analysis_id}_{first_mark}_{last_mark}",
-    )
-    end_frame = min(last, max(last_mark + 1, timestamp_to_frame(end_s, meta.fps)))
-    st.caption(f"Tracking starts at your first mark (t = {start_s:.2f} s) and stops at "
-               f"t = {frame_to_timestamp(end_frame, meta.fps):.2f} s. Try a short range first; "
-               f"the full video ends at {last_s:.2f} s.")
-    if st.button("Run tracking", type="primary"):
-        _run_tracking(record, end_frame, config.ANALYSIS_WIDTHS[res_label])
+    st.write(f"SwimVision will follow the selected swimmer from {start_s:.2f} seconds to the end "
+             f"of the video ({last_s:.2f} seconds), including the dive and underwater gaps.")
+    if st.button("Track my swimmer", type="primary", width="stretch"):
+        _run_tracking(record, last)
 
 
-def _run_tracking(record: AnalysisRecord, end_frame: int, analysis_width: int | None) -> None:
-    st.caption("Tracking is running. Don't click anything until it finishes: "
-               "any click restarts the page and cancels the run.")
-    bar = st.progress(0.0, text="Loading SAM 2…")
+def _run_tracking(record: AnalysisRecord, end_frame: int) -> None:
+    st.caption("Tracking is running. You can leave this tab open until it finishes.")
+    bar = st.progress(0.0, text="Loading swimmer models…")
 
     def on_progress(done: int, total: int) -> None:
         bar.progress(done / total, text=f"Tracking frame {done} of {total}")
 
-    annotated = config.ANNOTATED_DIR / f"{record.analysis_id}_sam2.mp4"
+    annotated = config.ANNOTATED_DIR / f"{record.analysis_id}_hybrid.mp4"
     try:
+        detector = _detector()
         results, run = track_swimmer(
-            record.absolute_video_path(), record.video, record.selections, end_frame, analysis_width,
-            annotated, debug_dir=config.DEBUG_DIR / record.analysis_id, progress=on_progress)
+            record.absolute_video_path(), record.video, record.selections[0], end_frame, annotated,
+            analysis_width=960, progress=on_progress, detector=detector)
     except SwimVisionError as exc:
         logger.exception("Tracking failed")
         bar.empty()
@@ -87,23 +79,21 @@ def render_tracking_results(record: AnalysisRecord) -> None:
     s, fps = run.stats, record.video.fps
     step_label("Step 3 · Tracking result")
     if tuple(record.selections) != run.selections:
-        st.warning("You changed the marks after this run. These results are for the previous marks; "
+        st.warning("You changed the chosen swimmer after this run. These results are for the previous selection; "
                    "run tracking again to update them.")
 
     t0, t1 = frame_to_timestamp(run.start_frame, fps), frame_to_timestamp(run.end_frame, fps)
     cards = [
         ("Analysed frames", f"{s.analyzed_frames}", f"t = {t0:.2f} – {t1:.2f} s"),
-        ("Mask found", f"{s.tracked_fraction:.0%}", f"{s.tracked_frames} frames"),
+        ("Swimmer followed", f"{s.tracked_fraction:.0%}", f"{s.tracked_frames} frames"),
         ("Lost frames", f"{s.lost_frames}", f"{len(s.lost_intervals)} interval(s) · "
-                                            f"{s.conflict_frames} where passes disagree"),
+                                            "where the tracker was not confident"),
         ("Longest loss", f"{s.longest_lost_s:.2f} s", f"{s.longest_lost_frames} frames"),
     ]
     for col, (label, value, sub) in zip(st.columns(len(cards)), cards):
         col.markdown(metric_card(label, value, sub), unsafe_allow_html=True)
-    st.caption("“Mask found” means SAM 2 returned a mask on that frame. It does not prove the mask is on "
-               "the right swimmer: watch the video. After a loss SAM 2 can pick up a different swimmer "
-               "or a splash. Frames where the forward and backward passes found different things are "
-               "counted as lost. Add a mark wherever a long loss starts and run again.")
+    st.caption("Green boxes are detector observations. Yellow boxes are short motion predictions through "
+               "a splash or underwater gap. Watch the result once to confirm it stayed on your swimmer.")
 
     video = record.absolute_annotated_path()
     if video and video.is_file():
@@ -121,15 +111,13 @@ def render_tracking_results(record: AnalysisRecord) -> None:
             "duration (s)": round(i.duration_s, 2), "first frame": i.start_frame, "last frame": i.end_frame,
         } for i in s.lost_intervals]), hide_index=True, width="stretch")
     else:
-        st.success("SAM 2 returned a mask on every analysed frame.")
+        st.success("The tracker followed the swimmer across every analysed frame.")
 
     with st.expander("Run details"):
-        st.write(f"Marks: {', '.join(f'frame {m.frame_index}' for m in run.selections)} · "
-                 f"model: `{run.model}` · device: {run.device} · fp16: {run.half_precision}")
+        st.write(f"Selection time: {frame_to_timestamp(run.selections[0].frame_index, fps):.2f} s · "
+                 f"model: `{run.model}` · device: {run.device}")
         st.write(f"Analysis size: {run.analysis_width}x{run.analysis_height} · every {run.stride} frame(s) · "
                  f"runtime {run.runtime_s:.1f} s")
-        if run.debug_dir:
-            st.write(f"Debug frames (mask drawn): `{run.debug_dir}`")
     table = load_tracking_table(record)
     if table is not None:
         st.download_button("Download per-frame tracking CSV", table.to_csv(index=False).encode("utf-8"),
