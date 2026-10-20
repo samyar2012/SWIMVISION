@@ -154,11 +154,11 @@ def main() -> int:
                 writer.write(frame)
                 continue
 
-            if not tracker.initialized:
-                tracker.start_from_box(target, frame.shape[:2], frame=frame)
-
             candidates = detector.detect(frame)
-            result = tracker.update(candidates, frame.shape[:2], frame=frame)
+            if not tracker.initialized:
+                result = tracker.start(candidates, frame.shape[:2], target_box=target, frame=frame)
+            else:
+                result = tracker.update(candidates, frame.shape[:2], frame=frame)
             processed += 1
             if result is None:
                 lost += 1

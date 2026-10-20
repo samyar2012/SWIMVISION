@@ -171,33 +171,11 @@ class HybridSwimmerDetector:
         swimmer: HybridDetection
     ) -> HybridDetection:
 
-        #
-        # Use the union of the two boxes.
-        #
-        # YOLO often sees more of the body outside
-        # the water, while the swimmer network
-        # frequently sees the stroke/body region.
-        #
-
-        x1 = min(
-            person.x1,
-            swimmer.x1
-        )
-
-        y1 = min(
-            person.y1,
-            swimmer.y1
-        )
-
-        x2 = max(
-            person.x2,
-            swimmer.x2
-        )
-
-        y2 = max(
-            person.y2,
-            swimmer.y2
-        )
+        # When both models agree, preserve the swimmer heatmap geometry. A
+        # union box becomes very large at water entry and destroys IoU-based
+        # track association by overlapping nearby lanes.
+        x1, y1 = swimmer.x1, swimmer.y1
+        x2, y2 = swimmer.x2, swimmer.y2
 
         #
         # Don't average the confidence directly

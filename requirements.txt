@@ -13,6 +13,7 @@ imageio-ffmpeg>=0.5        # bundles an FFmpeg binary (no manual FFmpeg install)
 
 # Phase 2: SAM 2 video segmentation (pretrained, no training)
 ultralytics>=8.4           # SAM2VideoPredictor (8.4 uses `quantize=16` for fp16)
+lap>=0.5.12                # assignment solver required by Ultralytics BoT-SORT
 torch>=2.2                 # pip installs the CPU build by default. For an NVIDIA GPU
                            # (much faster) see "GPU acceleration" in README.md.
 torchvision>=0.17
