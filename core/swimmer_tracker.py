@@ -10,13 +10,16 @@ track ID; this module never substitutes a different ID later.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any, Protocol, Sequence
 
 import numpy as np
 
 from core.geometry import BBox
+from core.pool_geometry import LaneCorridor, PoolGeometry
 
 
 class DetectionLike(Protocol):
@@ -30,6 +33,15 @@ class DetectionLike(Protocol):
 
 class HybridDetectorLike(Protocol):
     def detect(self, frame: Any) -> list[DetectionLike]: ...
+
+
+class TrackingPhase(str, Enum):
+    """Race phases with meaningfully different motion behaviour."""
+
+    START = "start"
+    DIVE = "dive"
+    SWIMMING = "swimming"
+    FINISH = "finish"
 
 
 @dataclass(frozen=True)
@@ -134,7 +146,7 @@ class PersistentSwimmerTracker:
         *,
         lane: LaneConstraint | None = None,
         max_missed_frames: int = 12,
-        max_reacquire_frames: int = 180,
+        max_reacquire_frames: int = 120,
         **_: Any,
     ) -> None:
         if max_missed_frames < 0:
@@ -153,6 +165,13 @@ class PersistentSwimmerTracker:
         self._last_source = "selection"
         self._advanced = False
         self._water_locked = False
+        self._lane_corridor: LaneCorridor | None = None
+        self._lane_geometry_misses = 0
+        self._phase = TrackingPhase.START
+        self._water_observations = 0
+        self._centres: deque[tuple[float, float]] = deque(maxlen=20)
+        self._areas: deque[float] = deque(maxlen=20)
+        self._travel_direction = 0
 
     @staticmethod
     def _make_backend(track_buffer: int) -> Any:
@@ -165,13 +184,13 @@ class PersistentSwimmerTracker:
             ) from exc
         args = SimpleNamespace(
             # Existing tracks may use weak U-Net heatmap observations. New
-            # identities still require 0.25, so background heat cannot spawn
+            # identities still require 0.30, so background heat cannot spawn
             # a swarm of tracks by itself.
             track_high_thresh=0.20,
             track_low_thresh=0.08,
-            new_track_thresh=0.25,
+            new_track_thresh=0.30,
             track_buffer=track_buffer,
-            match_thresh=0.80,
+            match_thresh=0.70,
             # Heatmap confidence is not calibrated like YOLO confidence; do
             # not multiply it into the IoU association distance.
             fuse_score=False,
@@ -201,6 +220,14 @@ class PersistentSwimmerTracker:
         """Whether the selected ID has handed off to the U-Net heatmap."""
         return self._water_locked
 
+    @property
+    def phase(self) -> TrackingPhase:
+        return self._phase
+
+    @property
+    def lane_locked(self) -> bool:
+        return self._lane_corridor is not None or self.lane is not None
+
     def reset(self) -> None:
         self._backend.reset()
         self._selection = None
@@ -210,6 +237,13 @@ class PersistentSwimmerTracker:
         self._last_source = "selection"
         self._advanced = False
         self._water_locked = False
+        self._lane_corridor = None
+        self._lane_geometry_misses = 0
+        self._phase = TrackingPhase.START
+        self._water_observations = 0
+        self._centres.clear()
+        self._areas.clear()
+        self._travel_direction = 0
 
     def start_from_box(
         self,
@@ -299,6 +333,7 @@ class PersistentSwimmerTracker:
     ) -> TrackedSwimmer | None:
         assert self._selection is not None
         height, width = frame_shape
+        self._refresh_lane_corridor(width, height)
         valid: list[DetectionLike] = []
         boxes: list[BBox] = []
         for detection in detections:
@@ -308,9 +343,16 @@ class PersistentSwimmerTracker:
             if self._water_locked and str(detection.source).lower() == "person":
                 continue
             box = self._box_for(detection, width, height)
-            if box is not None:
-                valid.append(detection)
-                boxes.append(box)
+            if box is None:
+                continue
+            source = str(detection.source).lower()
+            if source in {"swimmer", "both"}:
+                if not self._inside_locked_lane(box):
+                    continue
+                if self._water_locked and not self._plausible_target(box, width, height):
+                    continue
+            valid.append(detection)
+            boxes.append(box)
 
         # A user selection becomes the initial BoT-SORT observation only when
         # no detector box already represents it. This guarantees a track ID
@@ -341,11 +383,16 @@ class PersistentSwimmerTracker:
             source = str(detection.source).lower() if detection is not None else self._last_source
             if self.lane is not None and self.lane.score(box.center) is None:
                 return self._missing_target(width, height)
+            if source in {"swimmer", "both"} and not self._inside_locked_lane(box):
+                return self._missing_target(width, height)
             self._box = box
             self._missed_frames = 0
             self._last_source = source
             if source in {"swimmer", "both"}:
+                if not self._water_locked:
+                    self._phase = TrackingPhase.DIVE
                 self._water_locked = True
+                self._record_water_observation(box, width, height)
             confidence = float(target_row[5])
             return TrackedSwimmer(box, confidence, source, confidence, False, 0, detection)
 
@@ -355,7 +402,14 @@ class PersistentSwimmerTracker:
         self._missed_frames += 1
         if self._target_id is None or self._missed_frames > self.max_missed_frames:
             return None
-        predicted_box = self._lost_track_box(width, height) or self._box
+        # At a finish/turn the swimmer can become stationary at the wall.
+        # Continuing a Kalman velocity here is exactly how a box flies into an
+        # adjacent lane, so hold the last observation until detection returns.
+        predicted_box = (
+            self._box
+            if self._phase is TrackingPhase.FINISH
+            else self._lost_track_box(width, height) or self._box
+        )
         if predicted_box is None:
             return None
         self._box = predicted_box
@@ -368,6 +422,85 @@ class PersistentSwimmerTracker:
             if int(track.track_id) == self._target_id:
                 return BBox(*[float(value) for value in track.xyxy]).clamp(width, height)
         return None
+
+    def _refresh_lane_corridor(self, width: int, height: int) -> None:
+        geometry = getattr(self.detector, "last_lane_geometry", None)
+        if not isinstance(geometry, PoolGeometry):
+            self._lane_geometry_misses += 1
+            if self._lane_geometry_misses > 10:
+                self._lane_corridor = None
+            return
+        anchor = (self._box or self._selection)
+        if anchor is None:
+            return
+        # An upright swimmer on the block can be taller than the apparent
+        # lane width, so lane validity must be relative to the frame rather
+        # than to the selected person's temporary box shape.
+        minimum_width = max(8.0, height * 0.025)
+        corridor = geometry.corridor_for(anchor.center, minimum_width=minimum_width)
+        if corridor is not None:
+            self._lane_corridor = corridor
+            self._lane_geometry_misses = 0
+
+    def _inside_locked_lane(self, box: BBox) -> bool:
+        if self._lane_corridor is None:
+            return True
+        return self._lane_corridor.contains(box.center, margin=0.08) and self._lane_corridor.overlaps_box(
+            box, minimum_fraction=0.25
+        )
+
+    def _plausible_target(self, box: BBox, width: int, height: int) -> bool:
+        """Reject impossible jumps and shape changes before they corrupt the ID."""
+        if self._box is None:
+            return True
+        old_area = max(1.0, self._box.area)
+        area_ratio = box.area / old_area
+        minimum_ratio, maximum_ratio = (
+            (0.12, 6.0) if self._phase in {TrackingPhase.DIVE, TrackingPhase.FINISH} else (0.22, 4.0)
+        )
+        if not minimum_ratio <= area_ratio <= maximum_ratio:
+            return False
+
+        frame_diagonal = math.hypot(width, height)
+        box_diagonal = math.hypot(self._box.width, self._box.height)
+        phase_fraction = {
+            TrackingPhase.START: 0.24,
+            TrackingPhase.DIVE: 0.22,
+            TrackingPhase.SWIMMING: 0.14,
+            TrackingPhase.FINISH: 0.10,
+        }[self._phase]
+        maximum_distance = max(box_diagonal * 4.0, frame_diagonal * phase_fraction)
+        if math.dist(self._box.center, box.center) > maximum_distance:
+            return False
+
+        if self._travel_direction and self._phase is TrackingPhase.SWIMMING:
+            backwards = (box.center[0] - self._box.center[0]) * self._travel_direction
+            if backwards < -max(self._box.width, width * 0.025):
+                return False
+        return True
+
+    def _record_water_observation(self, box: BBox, width: int, height: int) -> None:
+        self._water_observations += 1
+        self._centres.append(box.center)
+        self._areas.append(box.area)
+        if self._water_observations >= 10 and self._phase is TrackingPhase.DIVE:
+            self._phase = TrackingPhase.SWIMMING
+
+        if len(self._centres) >= 6:
+            displacement = self._centres[-1][0] - self._centres[0][0]
+            if abs(displacement) >= width * 0.025:
+                self._travel_direction = 1 if displacement > 0 else -1
+
+        if self._phase is not TrackingPhase.SWIMMING or not self._travel_direction:
+            return
+        x, _ = box.center
+        approaching_edge = (
+            self._travel_direction > 0 and x >= width * 0.91
+        ) or (
+            self._travel_direction < 0 and x <= width * 0.09
+        )
+        if approaching_edge:
+            self._phase = TrackingPhase.FINISH
 
     @staticmethod
     def _choose_initial_id(rows: np.ndarray, selection: BBox) -> int:

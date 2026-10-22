@@ -7,7 +7,8 @@ import numpy as np
 import config
 from core.geometry import BBox
 from core.hybrid_detector import HybridDetection, HybridSwimmerDetector
-from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker
+from core.pool_geometry import LaneBoundary, PoolGeometry
+from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker, TrackingPhase
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,43 @@ def test_explicit_lane_constraint_remains_available_for_fixed_cameras() -> None:
     assert result is not None and result.predicted
 
 
+def test_automatic_lane_lock_rejects_an_adjacent_lane_before_association() -> None:
+    class GeometryProvider:
+        last_lane_geometry = PoolGeometry(
+            (LaneBoundary(0.0, 180.0), LaneBoundary(0.0, 280.0), LaneBoundary(0.0, 380.0)),
+            1000,
+            600,
+        )
+
+    tracker = PersistentSwimmerTracker(GeometryProvider(), max_missed_frames=3)
+    target = Detection(100, 205, 160, 255, source="swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=target_box(target), frame=BLANK_FRAME)
+
+    result = tracker.update(
+        [Detection(110, 305, 170, 355, 1.0, "swimmer")],
+        FRAME_SHAPE,
+        frame=BLANK_FRAME,
+    )
+
+    assert tracker.lane_locked
+    assert result is not None and result.predicted
+    assert result.center[1] < 280
+
+
+def test_finish_phase_holds_last_box_during_detection_gap() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=2)
+    tracker.start_from_box(BBox(700, 200, 760, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    for x in range(710, 911, 20):
+        tracker.update([Detection(x, 200, x + 60, 250, 0.8, "swimmer")], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert tracker.phase is TrackingPhase.FINISH
+    last_box = tracker._box
+    predicted = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert predicted is not None and predicted.predicted
+    assert predicted.box == last_box
+
+
 def test_detector_integration_uses_public_detect_contract() -> None:
     class FakeHybridDetector:
         def detect(self, frame):
@@ -188,3 +226,7 @@ def test_reset_forgets_the_selected_track_id() -> None:
 
     assert not tracker.initialized
     assert tracker.target_id is None
+
+
+def target_box(detection: Detection) -> BBox:
+    return BBox(detection.x1, detection.y1, detection.x2, detection.y2)

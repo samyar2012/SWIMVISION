@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import torch
 
+from core.pool_geometry import PoolGeometry, PoolLaneDetector
 from core.swimmer_model import DeeperUNetLike
 
 
@@ -24,10 +25,14 @@ class SwimmerDetector:
         input_size: int = 256,
         threshold: float = 0.35,
         min_blob_area: int = 10,
+        separate_lanes: bool = True,
     ):
         self.input_size = input_size
         self.threshold = threshold
         self.min_blob_area = min_blob_area
+        self.separate_lanes = separate_lanes
+        self.lane_detector = PoolLaneDetector() if separate_lanes else None
+        self.last_lane_geometry: PoolGeometry | None = None
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -112,6 +117,7 @@ class SwimmerDetector:
         heatmap: np.ndarray,
         original_width: int,
         original_height: int,
+        lane_geometry: PoolGeometry | None = None,
     ) -> list[Detection]:
 
         binary = (
@@ -119,7 +125,7 @@ class SwimmerDetector:
         ).astype(np.uint8) * 255
 
         close_kernel = np.ones(
-            (7, 7),
+            (5, 5),
             dtype=np.uint8
         )
 
@@ -127,19 +133,28 @@ class SwimmerDetector:
             binary,
             cv2.MORPH_CLOSE,
             close_kernel,
-            iterations=2
+            iterations=1
         )
 
         dilation_kernel = np.ones(
-            (5, 5),
+            (3, 3),
             dtype=np.uint8
         )
 
         binary = cv2.dilate(
             binary,
             dilation_kernel,
-            iterations=2
+            iterations=1
         )
+
+        # The U-Net paper this model comes from separates blobs at detected
+        # lane ropes before extracting boxes.  That prevents two adjacent
+        # swimmers from becoming one contour and subsequently one track.
+        if lane_geometry is not None:
+            binary = cv2.bitwise_and(
+                binary,
+                lane_geometry.separator_mask(self.input_size, self.input_size),
+            )
 
         contours, _ = cv2.findContours(
             binary,
@@ -191,9 +206,13 @@ class SwimmerDetector:
             if region.size == 0:
                 continue
 
-            confidence = float(
-                region.mean()
-            )
+            # Background inside the enclosing rectangle is not evidence
+            # against the swimmer.  Score only pixels that actually activated
+            # the segmentation model so BoT-SORT receives calibrated values.
+            active_pixels = region[region >= self.threshold]
+            if active_pixels.size == 0:
+                continue
+            confidence = float(active_pixels.mean())
 
             detections.append(
                 Detection(
@@ -220,8 +239,15 @@ class SwimmerDetector:
 
         heatmap = self.get_heatmap(frame)
 
+        self.last_lane_geometry = (
+            self.lane_detector.detect(frame)
+            if self.lane_detector is not None
+            else None
+        )
+
         return self._heatmap_to_detections(
             heatmap,
             original_width,
-            original_height
+            original_height,
+            self.last_lane_geometry,
         )
