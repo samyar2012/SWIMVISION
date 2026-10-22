@@ -21,10 +21,12 @@ data/*
 *.avi
 *.mkv
 *.m4v
+!tests/fixtures/*.mp4
 
 # Model weights (downloaded automatically at runtime)
 *.pt
 *.onnx
+!yolo26n.pt
 
 # OS / editor
 .DS_Store

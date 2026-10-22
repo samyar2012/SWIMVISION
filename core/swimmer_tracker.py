@@ -1,10 +1,12 @@
-"""Lock one user-selected swimmer to an established BoT-SORT track ID.
+"""Lock one user-selected swimmer to a persistent BoT-SORT trajectory.
 
 The hybrid detector still supplies YOLO observations before water entry and
 U-Net heatmap observations in the water. BoT-SORT associates *all* swimmers
 over time using a Kalman state, two-stage high/low-confidence matching, and
-camera-motion compensation. The box drawn by the user chooses one resulting
-track ID; this module never substitutes a different ID later.
+camera-motion compensation. The box drawn by the user chooses the initial
+person ID. A source-aware handoff joins that person to the nearest plausible
+swimmer heatmap track during the dive. Later relinking is restricted to nearby
+swimmer heatmap observations, so pool-deck people cannot take the identity.
 """
 
 from __future__ import annotations
@@ -133,7 +135,7 @@ class PersistentSwimmerTracker:
         detector: HybridDetectorLike | None = None,
         *,
         lane: LaneConstraint | None = None,
-        max_missed_frames: int = 12,
+        max_missed_frames: int = 45,
         max_reacquire_frames: int = 180,
         **_: Any,
     ) -> None:
@@ -149,6 +151,7 @@ class PersistentSwimmerTracker:
         self._selection: BBox | None = None
         self._target_id: int | None = None
         self._box: BBox | None = None
+        self._observed_box: BBox | None = None
         self._missed_frames = 0
         self._last_source = "selection"
         self._advanced = False
@@ -205,6 +208,7 @@ class PersistentSwimmerTracker:
         self._selection = None
         self._target_id = None
         self._box = None
+        self._observed_box = None
         self._missed_frames = 0
         self._last_source = "selection"
         self._advanced = False
@@ -225,6 +229,7 @@ class PersistentSwimmerTracker:
             raise ValueError("the initial swimmer box must have positive width and height")
         self._selection = selected
         self._box = selected
+        self._observed_box = selected
         self._last_source = source
         result = self._advance([], (height, width), frame, force_selection=True)
         return result or TrackedSwimmer(selected, 1.0, source, 1.0, False, 0)
@@ -264,6 +269,7 @@ class PersistentSwimmerTracker:
 
         self._selection = selection.clamp(width, height)
         self._box = self._selection
+        self._observed_box = self._selection
         result = self._advance(detections, (height, width), frame, force_selection=True)
         return result or TrackedSwimmer(self._selection, 1.0, "selection", 1.0, False, 0)
 
@@ -311,6 +317,15 @@ class PersistentSwimmerTracker:
                 valid.append(detection)
                 boxes.append(box)
 
+        # A dive changes the observation from an upright YOLO person box to a
+        # horizontal U-Net swimmer blob. Those boxes need not overlap, so
+        # BoT-SORT cannot always associate them by IoU alone. After two real
+        # person misses, nominate only the closest plausible swimmer blob for
+        # a source handoff and give it enough confidence to establish a track.
+        # The same gated path can relink a lost water track, but only to a
+        # nearby swimmer heatmap observation—not to a pool-deck person.
+        handoff_index = self._water_relink_candidate(valid, boxes, width, height)
+
         # The user's box is authoritative. On the first frame, boost the
         # overlapping YOLO observation to 1.0 so BoT-SORT must create that
         # identity even when YOLO reports the allowed minimum confidence of
@@ -342,6 +357,15 @@ class PersistentSwimmerTracker:
                 boxes.append(self._selection)
                 seed_index = len(boxes) - 1
 
+        if handoff_index is not None:
+            # A reset starts a new BoT-SORT sequence, so feed only the gated
+            # swimmer observation on that frame. Keeping unrelated candidates
+            # here makes the tracker's returned detection indices ambiguous
+            # and can bind the selected identity to a neighbouring lane.
+            valid = [valid[handoff_index]]
+            boxes = [boxes[handoff_index]]
+            handoff_index = 0
+
         rows = np.asarray(
             [
                 [
@@ -349,20 +373,33 @@ class PersistentSwimmerTracker:
                     box.y1,
                     box.x2,
                     box.y2,
-                    1.0 if index == seed_index else self._confidence(detection),
+                    1.0 if index in {seed_index, handoff_index} else self._confidence(detection),
                 ]
                 for index, (detection, box) in enumerate(zip(valid, boxes))
             ],
             dtype=np.float32,
         ).reshape(-1, 5)
         image = frame if isinstance(frame, np.ndarray) else np.zeros((height, width, 3), dtype=np.uint8)
+        if handoff_index is not None:
+            # Start the water trajectory on its first nominated observation.
+            # BoT-SORT otherwise keeps a new mid-sequence ID unconfirmed for
+            # one frame, which would create a false LOST result at the dive.
+            self._backend.reset()
         tracked = self._backend.update(_DetectionBatch(rows), image)
         self._advanced = True
 
         if self._target_id is None and len(tracked):
             self._target_id = self._choose_initial_id(tracked, self._selection)
 
-        target_row = next((row for row in tracked if int(round(row[4])) == self._target_id), None)
+        if handoff_index is not None:
+            target_row = next(
+                (row for row in tracked if int(round(row[7])) == handoff_index),
+                None,
+            )
+            if target_row is not None:
+                self._target_id = int(round(target_row[4]))
+        else:
+            target_row = next((row for row in tracked if int(round(row[4])) == self._target_id), None)
         if target_row is not None:
             box = BBox(*[float(value) for value in target_row[:4]]).clamp(width, height)
             index = int(round(target_row[7]))
@@ -371,6 +408,7 @@ class PersistentSwimmerTracker:
             if self.lane is not None and self.lane.score(box.center) is None:
                 return self._missing_target(width, height)
             self._box = box
+            self._observed_box = box
             self._missed_frames = 0
             self._last_source = source
             if source in {"swimmer", "both"}:
@@ -397,6 +435,71 @@ class PersistentSwimmerTracker:
             if int(track.track_id) == self._target_id:
                 return BBox(*[float(value) for value in track.xyxy]).clamp(width, height)
         return None
+
+    def _water_relink_candidate(
+        self,
+        detections: Sequence[DetectionLike],
+        boxes: Sequence[BBox],
+        width: int,
+        height: int,
+    ) -> int | None:
+        """Return one nearby U-Net candidate for handoff or water relinking."""
+        minimum_misses = 5 if self._water_locked else 2
+        anchor = self._observed_box or self._box
+        if not self._advanced or self._missed_frames < minimum_misses or anchor is None:
+            return None
+
+        # Do not hand off while YOLO still sees the selected person. This
+        # prevents incidental pool heatmaps from stealing the target on the
+        # blocks.
+        if not self._water_locked:
+            for detection, box in zip(detections, boxes):
+                if str(detection.source).lower() not in {"person", "both"}:
+                    continue
+                if box.iou(anchor) >= 0.10 or self._contains(box, anchor.center):
+                    return None
+
+        swimmers = [
+            index
+            for index, detection in enumerate(detections)
+            if str(detection.source).lower() in {"swimmer", "both"}
+        ]
+        if self._water_locked:
+            # In this fixed pool view, adjacent lanes are separated mostly on
+            # the image Y axis. During a short gap the selected swimmer cannot
+            # move a whole lane vertically, even if a neighbouring blob is
+            # closer diagonally to the last box edge.
+            maximum_lane_shift = max(anchor.height * 0.9, height * 0.10)
+            swimmers = [
+                index
+                for index in swimmers
+                if abs(boxes[index].center[1] - anchor.center[1]) <= maximum_lane_shift
+            ]
+            # The uploaded race has a yellow caution tape along the bottom
+            # edge that the heatmap occasionally labels as a swimmer. A real
+            # trajectory that was previously clear of the edge cannot become
+            # a border-clipped blob during a short detection gap.
+            if anchor.y2 < height * 0.95:
+                swimmers = [index for index in swimmers if boxes[index].y2 < height - 1]
+        if not swimmers:
+            return None
+
+        index = min(
+            swimmers,
+            key=lambda candidate: (
+                self._box_gap(anchor, boxes[candidate]),
+                math.dist(anchor.center, boxes[candidate].center),
+            ),
+        )
+        maximum_gap = max(24.0, math.hypot(width, height) * 0.16)
+        return index if self._box_gap(anchor, boxes[index]) <= maximum_gap else None
+
+    @staticmethod
+    def _box_gap(first: BBox, second: BBox) -> float:
+        """Shortest edge-to-edge distance between two boxes (zero if overlapping)."""
+        dx = max(first.x1 - second.x2, second.x1 - first.x2, 0.0)
+        dy = max(first.y1 - second.y2, second.y1 - first.y2, 0.0)
+        return math.hypot(dx, dy)
 
     @staticmethod
     def _choose_initial_id(rows: np.ndarray, selection: BBox) -> int:

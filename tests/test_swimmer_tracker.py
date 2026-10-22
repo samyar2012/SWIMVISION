@@ -74,6 +74,51 @@ def test_never_substitutes_adjacent_lane_id_when_target_disappears() -> None:
     assert tracker.target_id == selected_id
 
 
+def test_hands_selected_person_to_nearest_swimmer_once_after_dive_gap() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    person = Detection(610, 120, 690, 300, 0.7, "person")
+    tracker.start([person], FRAME_SHAPE, target_box=BBox(620, 140, 700, 310), frame=BLANK_FRAME)
+
+    tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+    target = Detection(520, 320, 710, 420, 0.12, "swimmer")
+    adjacent_lane = Detection(300, 260, 490, 350, 0.9, "swimmer")
+    result = tracker.update([adjacent_lane, target], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None
+    assert result.detection is target
+    assert result.source == "swimmer"
+    assert tracker.water_locked
+
+
+def test_water_relink_rejects_a_detection_one_lane_away() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    target = Detection(520, 330, 700, 420, 0.8, "swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(520, 330, 700, 420), frame=BLANK_FRAME)
+    for _ in range(6):
+        result = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    adjacent = Detection(500, 220, 690, 300, 0.9, "swimmer")
+    result = tracker.update([adjacent], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.center[1] > 330
+
+
+def test_water_relink_rejects_new_border_clipped_heatmap_blob() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    target = Detection(520, 330, 700, 420, 0.8, "swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(520, 330, 700, 420), frame=BLANK_FRAME)
+    for _ in range(6):
+        result = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    border_false_positive = Detection(560, 540, 710, 600, 0.9, "swimmer")
+    result = tracker.update([border_false_positive], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.box.y2 < FRAME_SHAPE[0]
+
+
 def test_low_confidence_heatmap_observation_recovers_existing_track() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=3)
     tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
