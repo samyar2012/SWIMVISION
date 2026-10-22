@@ -27,8 +27,8 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 ## How Phase 2 works
 
 1. **Choose.** Move a time slider until the swimmer is visible, drag the yellow box around them, and click **Use this swimmer**. The app reads the time, frame and pixel coordinates itself. This is the only manual selection.
-2. **Track.** Click **Track my swimmer**. YOLO finds the selected person before water entry. The app automatically detects lane-rope geometry, uses the ropes to split merged U-Net heatmap blobs, and locks the selected swimmer to the surrounding lane. As soon as that track receives a swimmer heatmap observation, the app permanently excludes pool-deck-only detections.
-3. **Bridge gaps.** BoT-SORT compensates for camera motion while lane, position, direction and box-shape gates reject implausible identity transfers. Tracking behavior changes automatically between start, dive, swimming and finish; at the finish it holds the last observation instead of projecting the swimmer through the wall. If the selected identity is unavailable, the app predicts briefly and then reports searching rather than substituting another swimmer.
+2. **Track.** Click **Track my swimmer**. YOLO finds the selected person before water entry. As soon as that track receives a swimmer U-Net heatmap observation, the app permanently switches it to heatmap-only tracking so pool-deck people cannot interfere. BoT-SORT compensates for camera motion and gives each trajectory a persistent ID; the box you draw selects one ID.
+3. **Bridge gaps.** Low-confidence heatmap regions are retained so BoT-SORT can use its second association stage to recover the selected trajectory through splash and partial submersion. If the selected ID is unavailable, the app predicts briefly and then reports searching; it never substitutes a different swimmer ID.
 4. **Report.** The result shows followed/lost frames, every lost interval, an annotated video and a per-frame CSV. Green boxes are detector observations; yellow boxes are short predictions through a gap.
 
 Timing always comes from frame index ÷ the video's real FPS. Videos above 30 fps are analysed every *n*-th frame (60 fps -> every 2nd); timestamps stay exact.
@@ -43,9 +43,7 @@ flowchart LR
     SEL --> G[core/geometry.py<br/>display px -> original px]
     SEL --> TR[ui/tracking.py<br/>run + results]
     TR --> H[core/hybrid_tracking.py<br/>YOLO + swimmer U-Net candidates]
-    H --> L[core/pool_geometry.py<br/>automatic lane-rope detection]
-    L --> P[core/swimmer_tracker.py<br/>lane-aware BoT-SORT + selected ID lock]
-    H --> P
+    H --> P[core/swimmer_tracker.py<br/>BoT-SORT + selected ID lock]
     P --> O[annotated video]
     P --> ST[(storage/analyses.py<br/>local JSON + CSV)]
     ST --> TR

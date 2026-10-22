@@ -41,6 +41,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--swimmer-threshold", type=float, default=0.35)
     parser.add_argument("--merge-iou-threshold", type=float, default=0.15)
     parser.add_argument("--start-frame", type=int, default=0, help="frame containing the target selection")
+    parser.add_argument("--end-frame", type=int, help="last frame to process (defaults to video end)")
     parser.add_argument(
         "--target-box",
         type=float,
@@ -134,6 +135,10 @@ def main() -> int:
     if args.start_frame >= frame_count:
         video.release()
         raise ValueError(f"--start-frame {args.start_frame} is outside the {frame_count}-frame video")
+    end_frame = frame_count - 1 if args.end_frame is None else args.end_frame
+    if not args.start_frame <= end_frame < frame_count:
+        video.release()
+        raise ValueError(f"--end-frame must be between {args.start_frame} and {frame_count - 1}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(str(args.output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
@@ -144,7 +149,7 @@ def main() -> int:
     tracked = predicted = lost = processed = 0
     target = BBox(*args.target_box)
     try:
-        for frame_index in range(frame_count):
+        for frame_index in range(end_frame + 1):
             ok, frame = video.read()
             if not ok:
                 break

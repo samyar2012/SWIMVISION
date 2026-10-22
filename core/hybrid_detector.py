@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from core.person_detector import PersonDetector
-from core.pool_geometry import PoolGeometry
 from core.swimmer_detector import SwimmerDetector
 
 
@@ -98,11 +97,6 @@ class HybridSwimmerDetector:
         self.merge_iou_threshold = (
             merge_iou_threshold
         )
-
-    @property
-    def last_lane_geometry(self) -> PoolGeometry | None:
-        """Pool geometry found while producing the latest swimmer heatmap."""
-        return self.swimmer_detector.last_lane_geometry
 
     def _get_person_candidates(
         self,
