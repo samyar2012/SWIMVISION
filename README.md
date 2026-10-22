@@ -27,7 +27,7 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 ## How Phase 2 works
 
 1. **Choose.** Move a time slider until the swimmer is visible, drag the yellow box around them, and click **Use this swimmer**. The app reads the time, frame and pixel coordinates itself. This is the only manual selection.
-2. **Track.** Click **Track my swimmer**. YOLO finds people on the block and outside the water; the swimmer U-Net heatmap specializes in the in-water part. BoT-SORT associates every swimmer over time, compensates for camera motion, and gives each trajectory a persistent ID. The box you draw selects one ID.
+2. **Track.** Click **Track my swimmer**. YOLO finds the selected person before water entry. As soon as that track receives a swimmer U-Net heatmap observation, the app permanently switches it to heatmap-only tracking so pool-deck people cannot interfere. BoT-SORT compensates for camera motion and gives each trajectory a persistent ID; the box you draw selects one ID.
 3. **Bridge gaps.** Low-confidence heatmap regions are retained so BoT-SORT can use its second association stage to recover the selected trajectory through splash and partial submersion. If the selected ID is unavailable, the app predicts briefly and then reports searching; it never substitutes a different swimmer ID.
 4. **Report.** The result shows followed/lost frames, every lost interval, an annotated video and a per-frame CSV. Green boxes are detector observations; yellow boxes are short predictions through a gap.
 

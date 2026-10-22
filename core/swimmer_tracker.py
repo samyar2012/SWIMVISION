@@ -152,6 +152,7 @@ class PersistentSwimmerTracker:
         self._missed_frames = 0
         self._last_source = "selection"
         self._advanced = False
+        self._water_locked = False
 
     @staticmethod
     def _make_backend(track_buffer: int) -> Any:
@@ -195,6 +196,11 @@ class PersistentSwimmerTracker:
     def target_id(self) -> int | None:
         return self._target_id
 
+    @property
+    def water_locked(self) -> bool:
+        """Whether the selected ID has handed off to the U-Net heatmap."""
+        return self._water_locked
+
     def reset(self) -> None:
         self._backend.reset()
         self._selection = None
@@ -203,6 +209,7 @@ class PersistentSwimmerTracker:
         self._missed_frames = 0
         self._last_source = "selection"
         self._advanced = False
+        self._water_locked = False
 
     def start_from_box(
         self,
@@ -295,6 +302,11 @@ class PersistentSwimmerTracker:
         valid: list[DetectionLike] = []
         boxes: list[BBox] = []
         for detection in detections:
+            # Once the selected swimmer has a real heatmap observation, keep
+            # the working in-water detector isolated. Pool-deck people from
+            # YOLO are no longer eligible to take part in association.
+            if self._water_locked and str(detection.source).lower() == "person":
+                continue
             box = self._box_for(detection, width, height)
             if box is not None:
                 valid.append(detection)
@@ -332,6 +344,8 @@ class PersistentSwimmerTracker:
             self._box = box
             self._missed_frames = 0
             self._last_source = source
+            if source in {"swimmer", "both"}:
+                self._water_locked = True
             confidence = float(target_row[5])
             return TrackedSwimmer(box, confidence, source, confidence, False, 0, detection)
 

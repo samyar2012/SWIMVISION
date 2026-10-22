@@ -38,10 +38,9 @@ MODELS_DIR: Path = PROJECT_ROOT / "models"        # downloaded pretrained weight
 PERSON_MODEL_PATH: Path = PROJECT_ROOT / "yolo26n.pt"  # Ultralytics downloads it on first use
 SWIMMER_MODEL_PATH: Path = MODELS_DIR / "colorShifts_deeper_zoomedOut_200epochs.pth"
 PERSON_CONFIDENCE: float = 0.25
-# Keep weak heatmap observations: BoT-SORT's second association stage is
-# specifically designed to recover an existing track from low-confidence
-# detections without starting new identities from them.
-SWIMMER_THRESHOLD: float = 0.22
+# Match the standalone heatmap test exactly. Lowering this threshold causes
+# nearby weak activations to join during morphology and can merge lanes.
+SWIMMER_THRESHOLD: float = 0.35
 MERGE_IOU_THRESHOLD: float = 0.15
 
 # --- Tracking (Phase 2): SAM 2 video segmentation, one swimmer ---------------

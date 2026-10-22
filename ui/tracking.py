@@ -19,7 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 @st.cache_resource(show_spinner=False)
-def _detector():
+def _detector(
+    person_model_path: str,
+    swimmer_model_path: str,
+    person_confidence: float,
+    swimmer_threshold: float,
+    merge_iou_threshold: float,
+):
+    """Cache one detector for one exact model/configuration combination.
+
+    The arguments intentionally form Streamlit's cache key. Without them,
+    changing a threshold or model could keep an old detector object alive
+    across an app reload even though the source code had changed.
+    """
     return load_hybrid_detector()
 
 
@@ -53,7 +65,13 @@ def _run_tracking(record: AnalysisRecord, end_frame: int) -> None:
 
     annotated = config.ANNOTATED_DIR / f"{record.analysis_id}_hybrid.mp4"
     try:
-        detector = _detector()
+        detector = _detector(
+            str(config.PERSON_MODEL_PATH),
+            str(config.SWIMMER_MODEL_PATH),
+            config.PERSON_CONFIDENCE,
+            config.SWIMMER_THRESHOLD,
+            config.MERGE_IOU_THRESHOLD,
+        )
         results, run = track_swimmer(
             record.absolute_video_path(), record.video, record.selections[0], end_frame, annotated,
             analysis_width=960, progress=on_progress, detector=detector)

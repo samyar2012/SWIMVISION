@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+import config
 from core.geometry import BBox
 from core.hybrid_detector import HybridDetection, HybridSwimmerDetector
 from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker
@@ -69,6 +70,31 @@ def test_low_confidence_heatmap_observation_recovers_existing_track() -> None:
     assert recovered is not None
     assert not recovered.predicted
     assert recovered.source == "swimmer"
+
+
+def test_water_handoff_permanently_excludes_person_only_detections() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=3)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    handoff = tracker.update(
+        [Detection(108, 200, 168, 250, 0.5, "swimmer")], FRAME_SHAPE, frame=BLANK_FRAME
+    )
+    assert handoff is not None and tracker.water_locked
+
+    result = tracker.update(
+        [
+            Detection(116, 200, 176, 250, 0.99, "person"),
+            Detection(116, 200, 176, 250, 0.35, "swimmer"),
+        ],
+        FRAME_SHAPE,
+        frame=BLANK_FRAME,
+    )
+
+    assert result is not None and not result.predicted
+    assert result.source == "swimmer"
+
+
+def test_streamlit_pipeline_uses_the_same_threshold_as_heatmap_script() -> None:
+    assert config.SWIMMER_THRESHOLD == 0.35
 
 
 def test_impossible_jump_creates_another_track_but_not_an_id_switch() -> None:
