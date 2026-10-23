@@ -119,6 +119,20 @@ def test_water_relink_rejects_new_border_clipped_heatmap_blob() -> None:
     assert result.box.y2 < FRAME_SHAPE[0]
 
 
+def test_water_relink_never_uses_person_heatmap_overlap() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    target = Detection(520, 330, 700, 420, 0.8, "swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(520, 330, 700, 420), frame=BLANK_FRAME)
+    for _ in range(6):
+        tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    spectator_overlap = Detection(525, 330, 705, 420, 0.99, "both")
+    result = tracker.update([spectator_overlap], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.detection is None
+
+
 def test_low_confidence_heatmap_observation_recovers_existing_track() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=3)
     tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)

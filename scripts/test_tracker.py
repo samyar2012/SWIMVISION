@@ -53,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lane-axis", choices=("x", "y"), default="y")
     parser.add_argument("--lane-min", type=float, help="first image-coordinate boundary of the lane")
     parser.add_argument("--lane-max", type=float, help="second image-coordinate boundary of the lane")
-    parser.add_argument("--max-missed", type=int, default=45, help="frames to show motion prediction")
+    parser.add_argument("--max-missed", type=int, default=60, help="frames to show motion prediction")
     parser.add_argument(
         "--max-reacquire", type=int, default=90,
         help="frames to retain identity after detections stop",
@@ -107,6 +107,16 @@ def _draw_track(frame, result: TrackedSwimmer | None, missed_frames: int) -> Non
     cv2.putText(frame, label, (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
 
 
+def _intervals(indices: list[int]) -> list[tuple[int, int]]:
+    intervals: list[list[int]] = []
+    for index in indices:
+        if not intervals or index > intervals[-1][1] + 1:
+            intervals.append([index, index])
+        else:
+            intervals[-1][1] = index
+    return [(start, end) for start, end in intervals]
+
+
 def main() -> int:
     args = _parse_args()
     if (args.lane_min is None) != (args.lane_max is None):
@@ -147,6 +157,7 @@ def main() -> int:
         raise RuntimeError(f"could not create output video: {args.output}")
 
     tracked = predicted = lost = processed = 0
+    lost_indices: list[int] = []
     target = BBox(*args.target_box)
     try:
         for frame_index in range(end_frame + 1):
@@ -167,6 +178,7 @@ def main() -> int:
             processed += 1
             if result is None:
                 lost += 1
+                lost_indices.append(frame_index)
             elif result.predicted:
                 predicted += 1
             else:
@@ -194,6 +206,7 @@ def main() -> int:
     print(f"Detector observations: {tracked}")
     print(f"Motion predictions: {predicted}")
     print(f"Lost (identity retained): {lost}")
+    print(f"Lost intervals: {_intervals(lost_indices)}")
     print(f"Output: {args.output}")
     return 0
 

@@ -135,7 +135,7 @@ class PersistentSwimmerTracker:
         detector: HybridDetectorLike | None = None,
         *,
         lane: LaneConstraint | None = None,
-        max_missed_frames: int = 45,
+        max_missed_frames: int = 60,
         max_reacquire_frames: int = 180,
         **_: Any,
     ) -> None:
@@ -310,7 +310,13 @@ class PersistentSwimmerTracker:
             # Once the selected swimmer has a real heatmap observation, keep
             # the working in-water detector isolated. Pool-deck people from
             # YOLO are no longer eligible to take part in association.
-            if self._water_locked and str(detection.source).lower() == "person":
+            source = str(detection.source).lower()
+            if self._water_locked and source == "person":
+                continue
+            # A `both` box is safe while it is continuously associated, but
+            # after a real gap it may be a spectator overlapping a false
+            # heatmap region. Require a pure swimmer observation to relink.
+            if self._water_locked and self._missed_frames >= 5 and source == "both":
                 continue
             box = self._box_for(detection, width, height)
             if box is not None:
@@ -445,7 +451,11 @@ class PersistentSwimmerTracker:
     ) -> int | None:
         """Return one nearby U-Net candidate for handoff or water relinking."""
         minimum_misses = 5 if self._water_locked else 2
-        anchor = self._observed_box or self._box
+        # While swimming, BoT-SORT's lost-track box includes global camera
+        # motion. Use it during a pan instead of freezing relinking around the
+        # last raw observation. Before the dive, the raw person observation is
+        # the safer anchor.
+        anchor = self._box if self._water_locked else (self._observed_box or self._box)
         if not self._advanced or self._missed_frames < minimum_misses or anchor is None:
             return None
 
@@ -459,10 +469,11 @@ class PersistentSwimmerTracker:
                 if box.iou(anchor) >= 0.10 or self._contains(box, anchor.center):
                     return None
 
+        allowed_sources = {"swimmer"} if self._water_locked else {"swimmer", "both"}
         swimmers = [
             index
             for index, detection in enumerate(detections)
-            if str(detection.source).lower() in {"swimmer", "both"}
+            if str(detection.source).lower() in allowed_sources
         ]
         if self._water_locked:
             # In this fixed pool view, adjacent lanes are separated mostly on
