@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 ProgressFn = Callable[[int, int], None]  # (steps done, steps total)
 MIN_BOX_SIDE_PX = 4
 AGREE_IOU = 0.3  # forward/backward boxes overlapping at least this much = same swimmer
-TRACKING_FORMAT_VERSION = 3  # version 2 (single mark) is still readable
+TRACKING_FORMAT_VERSION = 4  # versions 2 and 3 are still readable
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +92,15 @@ class FrameResult:
     mask_pixels: int   # mask area in analysis pixels; 0 when lost
     source: str = ""   # e.g. "forward from mark 1", "backward from mark 2"
     conflict: bool = False  # forward and backward passes disagreed -> reported as lost
+    predicted: bool = False  # a motion estimate, not a detector/visual observation
 
     @property
     def tracked(self) -> bool:
         return self.box is not None
+
+    @property
+    def observed(self) -> bool:
+        return self.box is not None and not self.predicted
 
 
 @dataclass(frozen=True)
@@ -120,6 +125,7 @@ class TrackingStats:
     longest_lost_s: float
     lost_intervals: tuple[LostInterval, ...]
     conflict_frames: int = 0  # included in lost_frames
+    estimated_frames: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -162,9 +168,9 @@ class TrackingRun:
     def from_dict(cls, data: dict[str, Any]) -> "TrackingRun | None":
         """Load a saved run; ``None`` for records written by older tracking code."""
         version = data.get("version")
-        if version not in (2, TRACKING_FORMAT_VERSION):
+        if version not in (2, 3, TRACKING_FORMAT_VERSION):
             return None
-        marks = data["selections"] if version == TRACKING_FORMAT_VERSION else [data["selection"]]
+        marks = data["selections"] if version in (3, TRACKING_FORMAT_VERSION) else [data["selection"]]
         plain = {k: v for k, v in data.items() if k not in ("version", "selection", "selections", "stats")}
         return cls(**plain, selections=tuple(Selection.from_dict(m) for m in marks),
                    stats=TrackingStats.from_dict(data["stats"]))
@@ -277,14 +283,17 @@ def compute_stats(results: list[FrameResult], sample_period_s: float) -> Trackin
             intervals.append(LostInterval(run[0].frame_index, run[-1].frame_index, run[0].timestamp_s,
                                           run[-1].timestamp_s, len(run), len(run) * sample_period_s))
             run = []
-    tracked = sum(r.tracked for r in results)
+    tracked = sum(r.observed for r in results)
+    estimated = sum(r.tracked and r.predicted for r in results)
+    lost = sum(not r.tracked for r in results)
     longest = max(intervals, key=lambda i: i.n_frames, default=None)
     return TrackingStats(
-        analyzed_frames=len(results), tracked_frames=tracked, lost_frames=len(results) - tracked,
+        analyzed_frames=len(results), tracked_frames=tracked, lost_frames=lost,
         tracked_fraction=tracked / len(results) if results else 0.0,
         longest_lost_frames=longest.n_frames if longest else 0,
         longest_lost_s=longest.duration_s if longest else 0.0,
         lost_intervals=tuple(intervals), conflict_frames=sum(r.conflict for r in results),
+        estimated_frames=estimated,
     )
 
 
@@ -295,7 +304,8 @@ def results_table(results: list[FrameResult]) -> pd.DataFrame:
         box = r.box
         rows.append({
             "frame_index": r.frame_index, "timestamp_s": round(r.timestamp_s, 4),
-            "status": "tracked" if r.tracked else ("conflict" if r.conflict else "lost"),
+            "status": ("estimated" if r.predicted and r.tracked else
+                       "tracked" if r.tracked else "conflict" if r.conflict else "lost"),
             "source": r.source,
             "x1": box.x1 if box else None, "y1": box.y1 if box else None,
             "x2": box.x2 if box else None, "y2": box.y2 if box else None,

@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import cv2  # noqa: E402
 
 from core.geometry import BBox  # noqa: E402
-from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker, TrackedSwimmer  # noqa: E402
+from core.swimmer_tracker import PersistentVisualSwimmerTracker, TrackedSwimmer  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,6 +40,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--person-confidence", type=float, default=0.25)
     parser.add_argument("--swimmer-threshold", type=float, default=0.35)
     parser.add_argument("--merge-iou-threshold", type=float, default=0.15)
+    parser.add_argument(
+        "--visual-model",
+        default="models/object_tracking_vittrack_2023sep.onnx",
+        help="OpenCV ViTTrack ONNX model",
+    )
     parser.add_argument("--start-frame", type=int, default=0, help="frame containing the target selection")
     parser.add_argument("--end-frame", type=int, help="last frame to process (defaults to video end)")
     parser.add_argument(
@@ -50,14 +55,8 @@ def _parse_args() -> argparse.Namespace:
         metavar=("X1", "Y1", "X2", "Y2"),
         help="box around the chosen swimmer on --start-frame",
     )
-    parser.add_argument("--lane-axis", choices=("x", "y"), default="y")
-    parser.add_argument("--lane-min", type=float, help="first image-coordinate boundary of the lane")
-    parser.add_argument("--lane-max", type=float, help="second image-coordinate boundary of the lane")
-    parser.add_argument("--max-missed", type=int, default=180, help="frames to retain the selected identity")
-    parser.add_argument(
-        "--max-reacquire", type=int, default=180,
-        help="frames to retain identity after detections stop",
-    )
+    parser.add_argument("--max-estimated", type=int, default=90,
+                        help="maximum explicitly marked motion estimates before LOST")
     parser.add_argument("--show", action="store_true", help="show a live preview; press q to stop")
     parser.add_argument("--draw-candidates", action="store_true", help="also draw all raw hybrid candidates")
     return parser.parse_args()
@@ -119,20 +118,13 @@ def _intervals(indices: list[int]) -> list[tuple[int, int]]:
 
 def main() -> int:
     args = _parse_args()
-    if (args.lane_min is None) != (args.lane_max is None):
-        raise ValueError("--lane-min and --lane-max must be supplied together")
     if args.start_frame < 0:
         raise ValueError("--start-frame cannot be negative")
 
     detector = _load_hybrid_detector(args)
-    lane = None
-    if args.lane_min is not None:
-        lane = LaneConstraint(args.lane_min, args.lane_max, args.lane_axis)
-    tracker = PersistentSwimmerTracker(
-        detector,
-        lane=lane,
-        max_missed_frames=args.max_missed,
-        max_reacquire_frames=args.max_reacquire,
+    tracker = PersistentVisualSwimmerTracker(
+        args.visual_model,
+        max_estimated_frames=args.max_estimated,
     )
 
     video = cv2.VideoCapture(str(args.video))
@@ -203,9 +195,9 @@ def main() -> int:
             cv2.destroyAllWindows()
 
     print(f"Processed: {processed} frames")
-    print(f"Detector observations: {tracked}")
-    print(f"Motion predictions: {predicted}")
-    print(f"Lost (identity retained): {lost}")
+    print(f"Verified visual/detector observations: {tracked}")
+    print(f"Explicitly marked motion estimates: {predicted}")
+    print(f"Lost: {lost}")
     print(f"Lost intervals: {_intervals(lost_indices)}")
     print(f"Output: {args.output}")
     return 0

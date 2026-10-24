@@ -10,7 +10,7 @@ import pytest
 import config
 from core.geometry import BBox
 from core.hybrid_detector import HybridSwimmerDetector
-from core.swimmer_tracker import PersistentSwimmerTracker, TrackedSwimmer
+from core.swimmer_tracker import PersistentSwimmerTracker, PersistentVisualSwimmerTracker, TrackedSwimmer
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -139,19 +139,19 @@ def test_video2_full_race_keeps_selected_lane_identity(
     # approach, turn, return length, and finish. This prevents a false pass
     # where the tracker merely returns *some* box on every frame.
     identity_regions = {
-        600: BBox(270, 250, 410, 464),
-        693: BBox(300, 150, 420, 285),
-        703: BBox(280, 270, 460, 464),
-        718: BBox(300, 190, 450, 360),
+        600: BBox(300, 250, 430, 400),
+        693: BBox(300, 120, 420, 260),
+        703: BBox(330, 150, 440, 270),
+        718: BBox(300, 180, 430, 330),
         760: BBox(340, 210, 500, 340),
         800: BBox(350, 70, 520, 210),
-        870: BBox(350, 0, 520, 140),
+        870: BBox(350, 0, 550, 140),
         890: BBox(350, 20, 500, 140),
         924: BBox(360, 140, 520, 270),
-        995: BBox(290, 170, 480, 310),
-        1066: BBox(320, 230, 600, 460),
-        1137: BBox(430, 300, 720, 464),
-        1208: BBox(380, 230, 650, 420),
+        995: BBox(580, 120, 760, 260),
+        1066: BBox(730, 200, 848, 330),
+        1137: BBox(760, 230, 848, 330),
+        1208: BBox(650, 220, 848, 360),
         1279: BBox(400, 190, 600, 330),
         1350: BBox(350, 130, 490, 250),
         1421: BBox(380, 130, 530, 250),
@@ -159,21 +159,52 @@ def test_video2_full_race_keeps_selected_lane_identity(
         1529: BBox(380, 180, 520, 290),
         1634: BBox(380, 180, 520, 290),
     }
-    tracker, final_result, water_observations, longest_gap, checkpoints = _run_clip(
-        detector,
-        "swimmer_video2_full.mp4",
-        BBox(275, 255, 395, 455),
-        1035,
-        set(identity_regions),
-        start_frame=600,
-    )
+    tracker = PersistentVisualSwimmerTracker(config.VIT_TRACKER_MODEL_PATH)
+    path = FIXTURES / "swimmer_video2_full.mp4"
+    video = cv2.VideoCapture(str(path))
+    assert video.isOpened(), f"could not open regression fixture: {path}"
+    checkpoints: dict[int, TrackedSwimmer] = {}
+    lost_frames: list[int] = []
+    observed = estimated = 0
+    longest_gap = prediction_gap = 0
+    final_result = None
+    frame_index = 0
+    try:
+        while True:
+            ok, frame = video.read()
+            if not ok:
+                break
+            candidates = detector.detect(frame)
+            final_result = (
+                tracker.start_from_box(BBox(390, 40, 500, 300), frame.shape[:2], frame=frame)
+                if not tracker.initialized
+                else tracker.update(candidates, frame.shape[:2], frame=frame)
+            )
+            if final_result is None:
+                lost_frames.append(frame_index)
+                prediction_gap = 0
+            elif final_result.predicted:
+                estimated += 1
+                prediction_gap += 1
+                longest_gap = max(longest_gap, prediction_gap)
+            else:
+                observed += 1
+                prediction_gap = 0
+            if frame_index in identity_regions and final_result is not None:
+                checkpoints[frame_index] = final_result
+            frame_index += 1
+    finally:
+        video.release()
 
+    assert frame_index == 1635, "the regression must process every frame of Video(2).mp4"
+    assert lost_frames == [], f"selected swimmer was lost at full-video frames {lost_frames}"
     assert tracker.water_locked
-    assert water_observations >= 350
-    assert longest_gap <= 180
+    assert observed >= 1400
+    assert estimated <= 200
+    assert longest_gap <= 90
     assert set(checkpoints) == set(identity_regions)
     for frame_index, region in identity_regions.items():
         assert region.x1 <= checkpoints[frame_index].center[0] <= region.x2
         assert region.y1 <= checkpoints[frame_index].center[1] <= region.y2
 
-    assert final_result.predicted  # detector stops at the wall; identity is deliberately retained
+    assert final_result is not None

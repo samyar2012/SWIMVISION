@@ -48,10 +48,9 @@ def render_tracking_controls(record: AnalysisRecord) -> None:
         st.warning("Choose your swimmer earlier in the video so there is something to track.")
         return
 
-    start_s = frame_to_timestamp(first_mark, meta.fps)
     last_s = frame_to_timestamp(last, meta.fps)
-    st.write(f"SwimVision will follow the selected swimmer from {start_s:.2f} seconds to the end "
-             f"of the video ({last_s:.2f} seconds), including the dive and underwater gaps.")
+    st.write(f"SwimVision will follow the selected swimmer across the full video "
+             f"({last_s:.2f} seconds), including the dive and underwater gaps.")
     if st.button("Track my swimmer", type="primary", width="stretch"):
         _run_tracking(record, last)
 
@@ -103,15 +102,15 @@ def render_tracking_results(record: AnalysisRecord) -> None:
     t0, t1 = frame_to_timestamp(run.start_frame, fps), frame_to_timestamp(run.end_frame, fps)
     cards = [
         ("Analysed frames", f"{s.analyzed_frames}", f"t = {t0:.2f} – {t1:.2f} s"),
-        ("Swimmer followed", f"{s.tracked_fraction:.0%}", f"{s.tracked_frames} frames"),
+        ("Verified", f"{s.tracked_fraction:.0%}", f"{s.tracked_frames} observed frames"),
+        ("Estimated", f"{s.estimated_frames}", "short occlusions without a verified observation"),
         ("Lost frames", f"{s.lost_frames}", f"{len(s.lost_intervals)} interval(s) · "
                                             "where the tracker was not confident"),
-        ("Longest loss", f"{s.longest_lost_s:.2f} s", f"{s.longest_lost_frames} frames"),
     ]
     for col, (label, value, sub) in zip(st.columns(len(cards)), cards):
         col.markdown(metric_card(label, value, sub), unsafe_allow_html=True)
-    st.caption("Green boxes are detector observations. Yellow boxes are short motion predictions through "
-               "a splash or underwater gap. Watch the result once to confirm it stayed on your swimmer.")
+    st.caption("Green boxes are visual or detector observations. Yellow boxes are explicitly marked "
+               "motion estimates through an occlusion; they are never counted as verified tracking.")
 
     video = record.absolute_annotated_path()
     if video and video.is_file():
@@ -129,7 +128,11 @@ def render_tracking_results(record: AnalysisRecord) -> None:
             "duration (s)": round(i.duration_s, 2), "first frame": i.start_frame, "last frame": i.end_frame,
         } for i in s.lost_intervals]), hide_index=True, width="stretch")
     else:
-        st.success("The tracker followed the swimmer across every analysed frame.")
+        if s.estimated_frames:
+            st.warning(f"The path covers every analysed frame, but {s.estimated_frames} frames are "
+                       "motion estimates rather than verified observations. Review the yellow sections.")
+        else:
+            st.success("The swimmer was directly observed on every analysed frame.")
 
     with st.expander("Run details"):
         st.write(f"Selection time: {frame_to_timestamp(run.selections[0].frame_index, fps):.2f} s · "

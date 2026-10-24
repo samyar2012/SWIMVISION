@@ -27,6 +27,7 @@ data/*
 *.pt
 *.onnx
 !yolo26n.pt
+!models/object_tracking_vittrack_2023sep.onnx
 
 # OS / editor
 .DS_Store

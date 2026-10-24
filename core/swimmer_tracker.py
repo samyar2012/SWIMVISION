@@ -1,20 +1,18 @@
-"""Lock one user-selected swimmer to a persistent BoT-SORT trajectory.
+"""Persistent tracking for one user-selected swimmer.
 
-The hybrid detector still supplies YOLO observations before water entry and
-U-Net heatmap observations in the water. BoT-SORT associates *all* swimmers
-over time using a Kalman state, two-stage high/low-confidence matching, and
-camera-motion compensation. The box drawn by the user chooses the initial
-person ID. A source-aware handoff joins that person to the nearest plausible
-swimmer heatmap track during the dive. Later relinking is restricted to nearby
-swimmer heatmap observations, so pool-deck people cannot take the identity.
+The app-facing tracker follows the pixels inside the user's box with OpenCV's
+single-object ViTTrack model before handing off to the existing swimmer
+heatmap in the pool. The older BoT-SORT implementation remains available for
+compatibility and detector experiments, but is not used by the Streamlit app.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 import numpy as np
 
@@ -769,3 +767,377 @@ class PersistentSwimmerTracker:
         if height <= 0 or width <= 0:
             raise ValueError("frame height and width must be positive")
         return height, width
+
+
+class _VitVisualTracker:
+    """Thin wrapper around OpenCV's official one-object ViTTrack API."""
+
+    def __init__(self, model_path: Path, frame: np.ndarray, box: BBox) -> None:
+        import cv2
+
+        params = cv2.TrackerVit_Params()
+        params.net = str(model_path)
+        params.backend = cv2.dnn.DNN_BACKEND_OPENCV
+        params.target = cv2.dnn.DNN_TARGET_CPU
+        self._tracker = cv2.TrackerVit_create(params)
+        self._tracker.init(
+            frame,
+            (round(box.x1), round(box.y1), round(box.width), round(box.height)),
+        )
+
+    def update(self, frame: np.ndarray) -> tuple[BBox | None, float]:
+        located, raw = self._tracker.update(frame)
+        score = float(self._tracker.getTrackingScore())
+        if not located:
+            return None, score
+        x, y, width, height = (float(value) for value in raw)
+        return BBox(x, y, x + width, y + height), score
+
+
+VisualFactory = Callable[[np.ndarray, BBox], Any]
+
+
+class PersistentVisualSwimmerTracker:
+    """Follow one selected swimmer with visual identity plus detector recovery.
+
+    This deliberately uses a single-object tracker before the dive. A
+    multi-object tracker can assign the selected ID to a nearby official or
+    lane flag when YOLO briefly loses the partially occluded swimmer. ViTTrack
+    instead follows the pixels inside the user's one box. After water entry,
+    swimmer-heatmap detections correct the visual track and the visual track
+    bridges detector gaps. Only a short, explicitly marked motion estimate is
+    returned when neither model has a trustworthy observation.
+    """
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        *,
+        max_estimated_frames: int = 90,
+        visual_threshold: float = 0.28,
+        visual_factory: VisualFactory | None = None,
+    ) -> None:
+        if max_estimated_frames < 0:
+            raise ValueError("max_estimated_frames must be non-negative")
+        self.model_path = Path(model_path)
+        self.max_estimated_frames = max_estimated_frames
+        self.visual_threshold = visual_threshold
+        self._visual_factory = visual_factory or (
+            lambda frame, box: _VitVisualTracker(self.model_path, frame, box)
+        )
+        self.reset()
+
+    @property
+    def initialized(self) -> bool:
+        return self._selection is not None
+
+    @property
+    def missed_frames(self) -> int:
+        return self._missed_frames
+
+    @property
+    def water_locked(self) -> bool:
+        return self._state == "water"
+
+    @property
+    def target_id(self) -> int | None:
+        """Compatibility property: one selected object always has ID 1."""
+        return 1 if self.initialized else None
+
+    def reset(self) -> None:
+        self._selection: BBox | None = None
+        self._box: BBox | None = None
+        self._observed_box: BBox | None = None
+        self._visual_box: BBox | None = None
+        self._visual: Any | None = None
+        self._state = "person"
+        self._person_missed = 0
+        self._entry_seen = False
+        self._missed_frames = 0
+        self._last_source = "selection"
+        self._velocity = (0.0, 0.0)
+
+    def start(
+        self,
+        detections: Sequence[DetectionLike],
+        frame_shape: Sequence[int],
+        *,
+        target_point: tuple[float, float] | None = None,
+        target_box: BBox | Sequence[float] | None = None,
+        frame: Any | None = None,
+    ) -> TrackedSwimmer:
+        height, width = PersistentSwimmerTracker._normalise_frame_shape(frame_shape)
+        if target_box is not None:
+            selected = target_box if isinstance(target_box, BBox) else BBox.from_list(list(target_box))
+        elif target_point is not None:
+            boxes = [self._box_for(detection, width, height) for detection in detections]
+            boxes = [box for box in boxes if box is not None]
+            if not boxes:
+                raise ValueError("cannot initialize the tracker without a valid detection")
+            selected = min(boxes, key=lambda box: math.dist(box.center, target_point))
+        else:
+            boxes = [(detection, self._box_for(detection, width, height)) for detection in detections]
+            boxes = [(detection, box) for detection, box in boxes if box is not None]
+            if not boxes:
+                raise ValueError("cannot initialize the tracker without a valid detection")
+            _, selected = max(boxes, key=lambda item: float(item[0].confidence))
+
+        selected = selected.clamp(width, height)
+        if selected.width <= 0 or selected.height <= 0:
+            raise ValueError("the initial swimmer box must have positive width and height")
+        self._selection = selected
+        self._box = selected
+        self._observed_box = selected
+        self._visual_box = selected
+        if isinstance(frame, np.ndarray):
+            self._reset_visual(frame, selected)
+        return TrackedSwimmer(selected, 1.0, "selection", 1.0, False, 0)
+
+    def start_from_box(
+        self,
+        box: BBox | Sequence[float],
+        frame_shape: Sequence[int],
+        *,
+        source: str = "selection",
+        frame: Any | None = None,
+    ) -> TrackedSwimmer:
+        result = self.start([], frame_shape, target_box=box, frame=frame)
+        return TrackedSwimmer(result.box, result.confidence, source, result.score, False, 0)
+
+    def update(
+        self,
+        detections: Sequence[DetectionLike],
+        frame_shape: Sequence[int],
+        *,
+        frame: Any | None = None,
+    ) -> TrackedSwimmer | None:
+        height, width = PersistentSwimmerTracker._normalise_frame_shape(frame_shape)
+        if self._selection is None:
+            if not detections:
+                return None
+            return self.start(detections, (height, width), frame=frame)
+        if not isinstance(frame, np.ndarray):
+            return self._estimate(width, height)
+
+        visual_box, visual_score = self._visual_update(frame, width, height)
+        candidates = [
+            (detection, box)
+            for detection in detections
+            if (box := self._box_for(detection, width, height)) is not None
+        ]
+        persons = [item for item in candidates if str(item[0].source).lower() in {"person", "both"}]
+        swimmers = [item for item in candidates if str(item[0].source).lower() in {"swimmer", "both"}]
+
+        if self._state == "person":
+            return self._update_person(frame, persons, swimmers, visual_box, visual_score, width, height)
+        return self._update_water(frame, swimmers, visual_box, visual_score, width, height)
+
+    def _update_person(
+        self,
+        frame: np.ndarray,
+        persons: list[tuple[DetectionLike, BBox]],
+        swimmers: list[tuple[DetectionLike, BBox]],
+        visual_box: BBox | None,
+        visual_score: float,
+        width: int,
+        height: int,
+    ) -> TrackedSwimmer | None:
+        assert self._visual_box is not None
+        valid_visual = self._visual_is_sane(visual_box, visual_score, self._visual_box, width, height)
+        if valid_visual:
+            assert visual_box is not None
+            self._visual_box = visual_box
+
+        person_gate = max(55.0, math.hypot(self._visual_box.width, self._visual_box.height) * 0.38)
+        near_person = any(
+            box.iou(self._visual_box) >= 0.04
+            or math.dist(box.center, self._visual_box.center) <= person_gate
+            for _, box in persons
+        )
+        self._person_missed = 0 if near_person else self._person_missed + 1
+        self._entry_seen = self._entry_seen or any(
+            box.y2 >= height * 0.70
+            and box.area >= self._visual_box.area * 0.25
+            and (
+                box.iou(self._visual_box) >= 0.02
+                or math.dist(box.center, self._visual_box.center)
+                <= math.hypot(self._visual_box.width, self._visual_box.height) * 0.75
+            )
+            for _, box in swimmers
+        )
+
+        if self._person_missed >= 5 and self._entry_seen:
+            gate = max(110.0, math.hypot(self._visual_box.width, self._visual_box.height) * 1.20)
+            eligible = [
+                (detection, box)
+                for detection, box in swimmers
+                if math.dist(box.center, self._visual_box.center) <= gate
+                and box.center[1] >= max(height * 0.52, self._visual_box.center[1] - 20.0)
+            ]
+            if eligible:
+                detection, box = min(
+                    eligible,
+                    key=lambda item: math.dist(item[1].center, self._visual_box.center),
+                )
+                self._state = "water"
+                self._reset_visual(frame, box)
+                return self._accept(box, self._confidence(detection), "swimmer", detection)
+
+        if valid_visual:
+            assert visual_box is not None
+            return self._accept(visual_box, visual_score, "visual-person")
+
+        # A tight YOLO correction can recover a one-frame visual dropout, but
+        # the gate is intentionally too small to jump to the next block.
+        assert self._box is not None
+        correction_gate = max(35.0, math.hypot(self._box.width, self._box.height) * 0.30)
+        corrections = [
+            (detection, box)
+            for detection, box in persons
+            if math.dist(box.center, self._box.center) <= correction_gate
+        ]
+        if corrections:
+            detection, box = min(corrections, key=lambda item: math.dist(item[1].center, self._box.center))
+            self._visual_box = box
+            self._reset_visual(frame, box)
+            return self._accept(box, self._confidence(detection), "person", detection)
+        return self._estimate(width, height)
+
+    def _update_water(
+        self,
+        frame: np.ndarray,
+        swimmers: list[tuple[DetectionLike, BBox]],
+        visual_box: BBox | None,
+        visual_score: float,
+        width: int,
+        height: int,
+    ) -> TrackedSwimmer | None:
+        assert self._box is not None
+        gate = max(
+            55.0,
+            math.hypot(self._box.width, self._box.height) * 0.70 + self._missed_frames * 2.0,
+        )
+        gate = min(gate, math.hypot(width, height) * 0.20)
+        valid_visual = self._visual_is_sane(visual_box, visual_score, self._box, width, height, gate=gate)
+        eligible = [
+            (detection, box)
+            for detection, box in swimmers
+            if math.dist(box.center, self._box.center) <= gate
+        ]
+        if eligible:
+            def rank(item: tuple[DetectionLike, BBox]) -> float:
+                detection, box = item
+                from_last = math.dist(box.center, self._box.center) / gate
+                from_visual = (
+                    math.dist(box.center, visual_box.center) / gate
+                    if valid_visual and visual_box is not None else 1.0
+                )
+                return 0.55 * from_last + 0.30 * from_visual - 0.15 * self._confidence(detection)
+
+            detection, box = min(eligible, key=rank)
+            correction = (
+                math.dist(box.center, visual_box.center)
+                if valid_visual and visual_box is not None else math.inf
+            )
+            if not valid_visual or correction > max(25.0, math.hypot(box.width, box.height) * 0.45):
+                self._reset_visual(frame, box)
+            return self._accept(box, self._confidence(detection), "swimmer", detection)
+        if valid_visual:
+            assert visual_box is not None
+            return self._accept(visual_box, visual_score, "visual-swimmer")
+        return self._estimate(width, height)
+
+    def _accept(
+        self,
+        box: BBox,
+        confidence: float,
+        source: str,
+        detection: DetectionLike | None = None,
+    ) -> TrackedSwimmer:
+        if self._observed_box is not None:
+            steps = self._missed_frames + 1
+            old_x, old_y = self._observed_box.center
+            new_x, new_y = box.center
+            measured = ((new_x - old_x) / steps, (new_y - old_y) / steps)
+            self._velocity = (
+                self._velocity[0] * 0.65 + measured[0] * 0.35,
+                self._velocity[1] * 0.65 + measured[1] * 0.35,
+            )
+        self._box = box
+        self._observed_box = box
+        self._missed_frames = 0
+        self._last_source = source
+        return TrackedSwimmer(box, confidence, source, confidence, False, 0, detection)
+
+    def _estimate(self, width: int, height: int) -> TrackedSwimmer | None:
+        assert self._box is not None
+        self._missed_frames += 1
+        if self._missed_frames > self.max_estimated_frames:
+            return None
+        move_x, move_y = self._velocity
+        # Never turn an estimate into the next identity anchor.  Doing that
+        # compounds small velocity errors and eventually pulls reacquisition
+        # toward another lane.  All matching remains anchored to ``_box``, the
+        # last verified visual/detector observation; this returned box is only
+        # an explicitly labelled display estimate.
+        steps = min(self._missed_frames, 12)
+        decay = 0.82 ** max(0, steps - 1)
+        predicted = BBox(
+            self._box.x1 + move_x * steps * decay,
+            self._box.y1 + move_y * steps * decay,
+            self._box.x2 + move_x * steps * decay,
+            self._box.y2 + move_y * steps * decay,
+        ).clamp(width, height)
+        confidence = max(0.0, 1.0 - self._missed_frames / (self.max_estimated_frames + 1))
+        return TrackedSwimmer(
+            predicted,
+            confidence,
+            f"estimated:{self._last_source}",
+            0.0,
+            True,
+            self._missed_frames,
+        )
+
+    def _visual_update(self, frame: np.ndarray, width: int, height: int) -> tuple[BBox | None, float]:
+        if self._visual is None:
+            return None, 0.0
+        try:
+            box, score = self._visual.update(frame)
+        except Exception:
+            return None, 0.0
+        if box is None:
+            return None, score
+        box = box.clamp(width, height)
+        return (box, score) if box.width > 0 and box.height > 0 else (None, score)
+
+    def _reset_visual(self, frame: np.ndarray, box: BBox) -> None:
+        self._visual = self._visual_factory(frame, box)
+        self._visual_box = box
+
+    def _visual_is_sane(
+        self,
+        box: BBox | None,
+        score: float,
+        anchor: BBox,
+        width: int,
+        height: int,
+        *,
+        gate: float | None = None,
+    ) -> bool:
+        if box is None or score < self.visual_threshold:
+            return False
+        ratio = box.area / max(anchor.area, 1.0)
+        maximum_shift = gate or max(70.0, math.hypot(anchor.width, anchor.height) * 0.55)
+        return (
+            0.25 <= ratio <= 3.0
+            and math.dist(box.center, anchor.center) <= maximum_shift
+            and box.is_inside(width, height)
+        )
+
+    @staticmethod
+    def _box_for(detection: DetectionLike, width: int, height: int) -> BBox | None:
+        return PersistentSwimmerTracker._box_for(detection, width, height)
+
+    @staticmethod
+    def _confidence(detection: DetectionLike) -> float:
+        return PersistentSwimmerTracker._confidence(detection)

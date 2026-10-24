@@ -7,7 +7,7 @@ import numpy as np
 import config
 from core.geometry import BBox
 from core.hybrid_detector import HybridDetection, HybridSwimmerDetector
-from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker
+from core.swimmer_tracker import LaneConstraint, PersistentSwimmerTracker, PersistentVisualSwimmerTracker
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,51 @@ class Detection:
 
 FRAME_SHAPE = (600, 1000)
 BLANK_FRAME = np.zeros((*FRAME_SHAPE, 3), dtype=np.uint8)
+
+
+class FakeVisualTracker:
+    def __init__(self, box: BBox | None, score: float = 1.0) -> None:
+        self.box = box
+        self.score = score
+
+    def update(self, _frame):
+        return self.box, self.score
+
+
+def test_visual_tracker_keeps_selected_person_instead_of_high_confidence_neighbor() -> None:
+    selected = BBox(100, 180, 170, 330)
+    visual = FakeVisualTracker(BBox(104, 180, 174, 330))
+    tracker = PersistentVisualSwimmerTracker(
+        "unused.onnx", visual_factory=lambda _frame, _box: visual,
+    )
+    tracker.start_from_box(selected, FRAME_SHAPE, frame=BLANK_FRAME)
+
+    result = tracker.update(
+        [Detection(500, 180, 570, 330, 0.99, "person")], FRAME_SHAPE, frame=BLANK_FRAME,
+    )
+
+    assert result is not None and result.source == "visual-person"
+    assert result.center[0] < 200
+
+
+def test_visual_tracker_rejects_an_impossible_adjacent_lane_jump() -> None:
+    selected = BBox(100, 250, 180, 390)
+    tracker = PersistentVisualSwimmerTracker(
+        "unused.onnx",
+        visual_factory=lambda _frame, _box: FakeVisualTracker(None, 0.0),
+        max_estimated_frames=10,
+    )
+    tracker.start_from_box(selected, FRAME_SHAPE, frame=BLANK_FRAME)
+    entry = Detection(110, 330, 210, 430, 0.8, "swimmer")
+    for _ in range(5):
+        result = tracker.update([entry], FRAME_SHAPE, frame=BLANK_FRAME)
+    assert tracker.water_locked and result is not None and not result.predicted
+
+    adjacent_lane = Detection(110, 90, 210, 180, 1.0, "swimmer")
+    result = tracker.update([adjacent_lane], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.center[1] > 300
 
 
 def test_selection_locks_the_matching_botsort_id() -> None:

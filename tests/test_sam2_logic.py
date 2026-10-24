@@ -70,6 +70,19 @@ def test_compute_stats_respects_stride():
     assert s.longest_lost_s == pytest.approx(2 * 2 / 60)
 
 
+def test_compute_stats_never_counts_motion_estimates_as_verified():
+    results = [
+        FrameResult(1, 0.0, A, 0),
+        FrameResult(2, 0.1, A, 0, "estimated", predicted=True),
+        FrameResult(3, 0.2, None, 0),
+    ]
+    s = compute_stats(results, 0.1)
+
+    assert (s.tracked_frames, s.estimated_frames, s.lost_frames) == (1, 1, 1)
+    assert s.tracked_fraction == pytest.approx(1 / 3)
+    assert list(results_table(results)["status"]) == ["tracked", "estimated", "lost"]
+
+
 def test_results_table_marks_lost_rows_empty():
     table = results_table(_results("T."))
     assert list(table["status"]) == ["tracked", "lost"]

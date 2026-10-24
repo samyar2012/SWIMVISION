@@ -27,7 +27,7 @@ class FakeHybridDetector:
         if self.calls == 3:  # splash: force one motion-predicted frame
             return []
         x1 = 40 + self.calls * 3
-        return [Detection(x1, 80, x1 + 40, 120, 0.9, "swimmer")]
+        return [Detection(x1, 80, x1 + 40, 120, 0.9, "person")]
 
 
 def test_tracks_from_one_visual_selection_without_lane_or_frame_inputs(mp4_30fps, tmp_path) -> None:
@@ -46,8 +46,11 @@ def test_tracks_from_one_visual_selection_without_lane_or_frame_inputs(mp4_30fps
 
     assert len(results) == 6
     assert all(result.tracked for result in results)
-    assert results[2].source.startswith("predicted:")
+    assert results[2].source.startswith("estimated:")
+    assert results[2].predicted
     assert run.selections == (selection,)
-    assert run.stats.tracked_fraction == 1.0
+    assert run.stats.tracked_frames == 5
+    assert run.stats.estimated_frames == 1
+    assert run.stats.lost_frames == 0
     assert run.output_video["frames"] == 6
     assert output.is_file()

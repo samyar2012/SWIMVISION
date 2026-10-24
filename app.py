@@ -56,7 +56,7 @@ def _render_sidebar() -> None:
         if not records:
             st.caption("None yet. Upload a video to create one.")
         for rec in records[:10]:
-            status = f"tracked {rec.tracking.stats.tracked_fraction:.0%}" if rec.tracking else "not tracked yet"
+            status = f"verified {rec.tracking.stats.tracked_fraction:.0%}" if rec.tracking else "not tracked yet"
             if st.button(rec.original_filename, key=f"open_{rec.analysis_id}", width="stretch",
                          help=f"{rec.race.label} · {rec.video.duration_s:.1f} s · id {rec.analysis_id}"):
                 st.session_state[ACTIVE_ANALYSIS_KEY] = rec.analysis_id

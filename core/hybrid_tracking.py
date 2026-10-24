@@ -1,8 +1,8 @@
 """Run the hybrid detector and persistent tracker over one selected swimmer.
 
 The user supplies one visual box on one frame.  Everything else is automatic:
-the hybrid detector produces candidates, ``PersistentSwimmerTracker`` keeps
-identity through source handoffs and short gaps, and this module writes a
+the hybrid detector produces candidates, ``PersistentVisualSwimmerTracker`` keeps
+the selected visual identity through source handoffs and short gaps, and this module writes a
 browser-playable annotated video plus the normal per-frame result table.
 """
 
@@ -26,7 +26,7 @@ from core.sam2_tracking import (
     compute_stats,
     verify_output_video,
 )
-from core.swimmer_tracker import HybridDetectorLike, PersistentSwimmerTracker, TrackedSwimmer
+from core.swimmer_tracker import HybridDetectorLike, PersistentVisualSwimmerTracker, TrackedSwimmer
 from core.video import VideoMetadata, analysis_stride, frame_to_timestamp, open_h264_writer
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ def _draw_result(
     if result is None:
         label, colour = "SEARCHING FOR SWIMMER", _LOST
     else:
-        label = "PREDICTED THROUGH GAP" if result.predicted else "TRACKED"
+        label = "ESTIMATED THROUGH OCCLUSION" if result.predicted else "TRACKED"
         colour = _PREDICTED if result.predicted else _TRACKED
         x1, y1, x2, y2 = result.box.to_int_list()
         cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
@@ -115,7 +115,9 @@ def track_swimmer(
     stride = analysis_stride(meta.fps)
     indices = list(range(selection.frame_index, end_frame + 1, stride))
     detector = detector or load_hybrid_detector()
-    tracker = PersistentSwimmerTracker(detector)
+    if not config.VIT_TRACKER_MODEL_PATH.is_file():
+        raise ModelLoadError(f"Visual tracker model is missing: {config.VIT_TRACKER_MODEL_PATH}")
+    tracker = PersistentVisualSwimmerTracker(config.VIT_TRACKER_MODEL_PATH)
     selected_box = selection.box.scaled(sx, sy)
 
     cap = cv2.VideoCapture(str(video_path))
@@ -157,7 +159,10 @@ def track_swimmer(
                 result = FrameResult(frame_index, timestamp, None, 0, "")
             else:
                 original_box = tracked.box.scaled(1 / sx, 1 / sy).clamp(meta.width, meta.height)
-                result = FrameResult(frame_index, timestamp, original_box, 0, tracked.source)
+                result = FrameResult(
+                    frame_index, timestamp, original_box, 0, tracked.source,
+                    predicted=tracked.predicted,
+                )
             results.append(result)
             if progress:
                 progress(len(results), len(indices))
@@ -182,7 +187,8 @@ def track_swimmer(
         stride=stride,
         analysis_width=aw,
         analysis_height=ah,
-        model=f"{config.PERSON_MODEL_PATH.name} + {config.SWIMMER_MODEL_PATH.name}",
+        model=(f"{config.VIT_TRACKER_MODEL_PATH.name} + {config.PERSON_MODEL_PATH.name} + "
+               f"{config.SWIMMER_MODEL_PATH.name}"),
         device=device,
         half_precision=False,
         runtime_s=round(time.perf_counter() - started, 2),
@@ -190,6 +196,7 @@ def track_swimmer(
         output_video=output,
         debug_dir=None,
     )
-    logger.info("Hybrid tracker followed %d/%d frames in %.1f s",
-                stats.tracked_frames, stats.analyzed_frames, run.runtime_s)
+    logger.info("Hybrid tracker observed %d/%d frames, estimated %d and lost %d in %.1f s",
+                stats.tracked_frames, stats.analyzed_frames, stats.estimated_frames,
+                stats.lost_frames, run.runtime_s)
     return results, run

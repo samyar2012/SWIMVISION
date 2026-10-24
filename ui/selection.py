@@ -1,4 +1,4 @@
-"""Step 1: mark the swimmer - drag a rectangle around them on one or more frames.
+"""Step 1: identify the swimmer once on the opening video frame.
 
 Uses ``streamlit-cropper``: a canvas with a visible rectangle the user can move
 and resize. We resize the frame ourselves (``should_resize_image=False``) so
@@ -23,7 +23,7 @@ from core.errors import SwimVisionError
 from core.geometry import BBox, box_to_cropper_coords, cropper_rect_to_box, display_size
 from core.overlay import zoomed_crop
 from core.sam2_tracking import Selection
-from core.video import frame_to_timestamp, read_frame, timestamp_to_frame
+from core.video import read_frame
 from storage.analyses import AnalysisRecord, save_analysis
 from ui.styles import step_label
 
@@ -50,24 +50,18 @@ def _set_mark(record: AnalysisRecord, mark: Selection) -> None:
 
 
 def render_selection(record: AnalysisRecord) -> None:
-    """Frame slider + rectangle tool + zoomed check + the list of marks."""
+    """One rectangle on the opening frame; no time or interval input."""
     meta = record.video
     step_label("Step 1 · Choose your swimmer")
-    st.markdown("Move the slider until your swimmer is clearly visible, then drag the yellow box "
-                "around them. You only do this once—SwimVision handles the rest.")
+    st.markdown("Drag the yellow box around your swimmer in the opening frame. "
+                "That is the only selection—there is no start time, end time, or second mark.")
 
-    last = meta.frame_count - 1
-    start_s = frame_to_timestamp(record.selections[0].frame_index, meta.fps) if record.selections else 0.0
-    col_slider, col_size = st.columns([4, 1])
-    moment = col_slider.slider(
-        "Moment in video", 0.0, max(meta.duration_s - 1 / meta.fps, 0.0),
-        min(start_s, meta.duration_s), step=max(round(1 / meta.fps, 3), 0.01),
-        format="%.2f seconds", key=f"sel_moment_{record.analysis_id}",
-    ) if last > 0 else 0.0
-    frame_idx = min(last, timestamp_to_frame(moment, meta.fps))
-    size_label = col_size.radio("Image size", list(config.SELECTION_DISPLAY_WIDTHS),
-                                key=f"sel_size_{record.analysis_id}")
-    st.caption(f"Showing {frame_to_timestamp(frame_idx, meta.fps):.2f} seconds into the video")
+    frame_idx = 0
+    size_label = st.radio(
+        "Image size", list(config.SELECTION_DISPLAY_WIDTHS), horizontal=True,
+        key=f"sel_size_{record.analysis_id}",
+    )
+    st.caption("Opening frame · tracking will cover the entire video")
 
     try:
         frame = read_frame(record.absolute_video_path(), frame_idx)
@@ -103,5 +97,4 @@ def _render_marks(record: AnalysisRecord) -> None:
         st.info("Draw the yellow box around your swimmer, then click **Use this swimmer**.")
         return
     mark = record.selections[0]
-    st.success(f"Swimmer chosen at {frame_to_timestamp(mark.frame_index, record.video.fps):.2f} seconds. "
-               "No frame numbers, coordinates, or lane boundaries are needed.")
+    st.success("Swimmer chosen. No times, frame numbers, coordinates, or lane boundaries are needed.")

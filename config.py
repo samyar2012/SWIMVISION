@@ -37,6 +37,7 @@ MODELS_DIR: Path = PROJECT_ROOT / "models"        # downloaded pretrained weight
 # --- Hybrid persistent tracker ------------------------------------------------
 PERSON_MODEL_PATH: Path = PROJECT_ROOT / "yolo26n.pt"  # Ultralytics downloads it on first use
 SWIMMER_MODEL_PATH: Path = MODELS_DIR / "colorShifts_deeper_zoomedOut_200epochs.pth"
+VIT_TRACKER_MODEL_PATH: Path = MODELS_DIR / "object_tracking_vittrack_2023sep.onnx"
 PERSON_CONFIDENCE: float = 0.25
 # Match the standalone heatmap test exactly. Lowering this threshold causes
 # nearby weak activations to join during morphology and can merge lanes.
