@@ -33,6 +33,7 @@ def _run_clip(
     selection: BBox,
     expected_frames: int,
     checkpoint_frames: set[int] | None = None,
+    start_frame: int = 0,
 ) -> tuple[PersistentSwimmerTracker, TrackedSwimmer, int, int, dict[int, TrackedSwimmer]]:
     tracker = PersistentSwimmerTracker(detector)
     path = FIXTURES / name
@@ -45,11 +46,15 @@ def _run_clip(
     checkpoints: dict[int, TrackedSwimmer] = {}
     final_result = None
     frame_index = 0
+    processed_frames = 0
     try:
         while True:
             ok, frame = video.read()
             if not ok:
                 break
+            if frame_index < start_frame:
+                frame_index += 1
+                continue
             candidates = detector.detect(frame)
             final_result = (
                 tracker.start(candidates, frame.shape[:2], target_box=selection, frame=frame)
@@ -69,10 +74,11 @@ def _run_clip(
             if checkpoint_frames and frame_index in checkpoint_frames and final_result is not None:
                 checkpoints[frame_index] = final_result
             frame_index += 1
+            processed_frames += 1
     finally:
         video.release()
 
-    assert frame_index == expected_frames
+    assert processed_frames == expected_frames
     assert lost_frames == [], f"selected swimmer was lost at fixture frames {lost_frames}"
     assert final_result is not None
     return tracker, final_result, water_observations, longest_prediction_gap, checkpoints
@@ -123,3 +129,51 @@ def test_uploaded_camera_pan_never_relinks_to_spectators(
     final_x, final_y = final_result.center
     assert final_x < 200
     assert final_y > 330
+
+
+def test_video2_full_race_keeps_selected_lane_identity(
+    detector: HybridSwimmerDetector,
+) -> None:
+    # This is the complete user-supplied Video(2).mp4, not a synthetic clip.
+    # The regions were checked against the selected lane at the dive, far-wall
+    # approach, turn, return length, and finish. This prevents a false pass
+    # where the tracker merely returns *some* box on every frame.
+    identity_regions = {
+        600: BBox(270, 250, 410, 464),
+        693: BBox(300, 150, 420, 285),
+        703: BBox(280, 270, 460, 464),
+        718: BBox(300, 190, 450, 360),
+        760: BBox(340, 210, 500, 340),
+        800: BBox(350, 70, 520, 210),
+        870: BBox(350, 0, 520, 140),
+        890: BBox(350, 20, 500, 140),
+        924: BBox(360, 140, 520, 270),
+        995: BBox(290, 170, 480, 310),
+        1066: BBox(320, 230, 600, 460),
+        1137: BBox(430, 300, 720, 464),
+        1208: BBox(380, 230, 650, 420),
+        1279: BBox(400, 190, 600, 330),
+        1350: BBox(350, 130, 490, 250),
+        1421: BBox(380, 130, 530, 250),
+        1490: BBox(400, 160, 530, 260),
+        1529: BBox(380, 180, 520, 290),
+        1634: BBox(380, 180, 520, 290),
+    }
+    tracker, final_result, water_observations, longest_gap, checkpoints = _run_clip(
+        detector,
+        "swimmer_video2_full.mp4",
+        BBox(275, 255, 395, 455),
+        1035,
+        set(identity_regions),
+        start_frame=600,
+    )
+
+    assert tracker.water_locked
+    assert water_observations >= 350
+    assert longest_gap <= 180
+    assert set(checkpoints) == set(identity_regions)
+    for frame_index, region in identity_regions.items():
+        assert region.x1 <= checkpoints[frame_index].center[0] <= region.x2
+        assert region.y1 <= checkpoints[frame_index].center[1] <= region.y2
+
+    assert final_result.predicted  # detector stops at the wall; identity is deliberately retained

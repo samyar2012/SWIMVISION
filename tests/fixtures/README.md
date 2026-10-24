@@ -13,3 +13,10 @@ tests from accepting changes that lose or switch the swimmer in real footage.
 from the same upload. It covers a foreground spectator occlusion and a large
 camera pan that previously caused the tracker to relink to spectators for six
 seconds. Its frame-0 selection is `(278, 53, 407, 125)`.
+
+`swimmer_video2_full.mp4` is the complete uploaded `video(2).mp4` (1,635
+frames). The regression starts at frame 600 with selection box
+`(275, 255, 395, 455)` and processes all 1,035 remaining frames. In addition
+to requiring zero `None` results, it checks hand-verified identity regions at
+the block, dive, both lengths, turn, and finish so tracking the wrong lane
+cannot satisfy the test.

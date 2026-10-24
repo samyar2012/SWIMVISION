@@ -37,6 +37,15 @@ def test_selection_locks_the_matching_botsort_id() -> None:
     assert tracker.target_id is not None
 
 
+def test_box_selection_on_existing_swimmer_starts_in_water_mode() -> None:
+    tracker = PersistentSwimmerTracker()
+    target = Detection(100, 200, 160, 250, 0.8, "swimmer")
+
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(95, 195, 165, 255), frame=BLANK_FRAME)
+
+    assert tracker.water_locked
+
+
 def test_minimum_confidence_selected_person_is_seeded_not_replaced() -> None:
     tracker = PersistentSwimmerTracker()
     target = Detection(100, 200, 160, 250, 0.25, "person")
@@ -74,31 +83,35 @@ def test_never_substitutes_adjacent_lane_id_when_target_disappears() -> None:
     assert tracker.target_id == selected_id
 
 
-def test_hands_selected_person_to_nearest_swimmer_once_after_dive_gap() -> None:
+def test_person_handoff_requires_semantically_verified_swimmer() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=45)
     person = Detection(610, 120, 690, 300, 0.7, "person")
     tracker.start([person], FRAME_SHAPE, target_box=BBox(620, 140, 700, 310), frame=BLANK_FRAME)
 
-    tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
-    tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
-    target = Detection(520, 320, 710, 420, 0.12, "swimmer")
+    for _ in range(8):
+        tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+    target = Detection(520, 320, 710, 420, 0.12, "both")
     adjacent_lane = Detection(300, 260, 490, 350, 0.9, "swimmer")
     result = tracker.update([adjacent_lane, target], FRAME_SHAPE, frame=BLANK_FRAME)
 
     assert result is not None
     assert result.detection is target
-    assert result.source == "swimmer"
+    assert result.source == "both"
     assert tracker.water_locked
 
 
 def test_water_relink_rejects_a_detection_one_lane_away() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=45)
     target = Detection(520, 330, 700, 420, 0.8, "swimmer")
-    tracker.start([target], FRAME_SHAPE, target_box=BBox(520, 330, 700, 420), frame=BLANK_FRAME)
+    adjacent = Detection(500, 220, 690, 300, 0.9, "swimmer")
+    tracker.start(
+        [target, adjacent], FRAME_SHAPE, target_box=BBox(520, 330, 700, 420), frame=BLANK_FRAME
+    )
+    for _ in range(30):
+        tracker.update([target, adjacent], FRAME_SHAPE, frame=BLANK_FRAME)
     for _ in range(6):
         result = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
 
-    adjacent = Detection(500, 220, 690, 300, 0.9, "swimmer")
     result = tracker.update([adjacent], FRAME_SHAPE, frame=BLANK_FRAME)
 
     assert result is not None and result.predicted
@@ -119,6 +132,41 @@ def test_water_relink_rejects_new_border_clipped_heatmap_blob() -> None:
     assert result.box.y2 < FRAME_SHAPE[0]
 
 
+def test_water_relink_rejects_lane_flag_then_accepts_real_swimmer() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    target = Detection(270, 260, 460, 380, 0.8, "swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(270, 260, 460, 380), frame=BLANK_FRAME)
+    for _ in range(7):
+        tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    lane_flag = Detection(190, 90, 300, 190, 0.95, "swimmer")
+    rejected = tracker.update([lane_flag], FRAME_SHAPE, frame=BLANK_FRAME)
+    real_swimmer = Detection(350, 230, 470, 310, 0.8, "swimmer")
+    recovered = tracker.update([real_swimmer], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert rejected is not None and rejected.predicted
+    assert rejected.center[1] > 200
+    assert recovered is not None and not recovered.predicted
+    assert recovered.detection is real_swimmer
+
+
+def test_long_detector_gap_holds_last_verified_box_instead_of_drifting() -> None:
+    tracker = PersistentSwimmerTracker(max_missed_frames=45)
+    target = Detection(270, 260, 460, 380, 0.8, "swimmer")
+    tracker.start([target], FRAME_SHAPE, target_box=BBox(270, 260, 460, 380), frame=BLANK_FRAME)
+    last_observation = tracker.update(
+        [Detection(280, 260, 470, 380, 0.8, "swimmer")], FRAME_SHAPE, frame=BLANK_FRAME
+    )
+    assert last_observation is not None
+
+    predicted = None
+    for _ in range(20):
+        predicted = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert predicted is not None and predicted.predicted
+    assert predicted.box == last_observation.box
+
+
 def test_water_relink_never_uses_person_heatmap_overlap() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=45)
     target = Detection(520, 330, 700, 420, 0.8, "swimmer")
@@ -135,7 +183,7 @@ def test_water_relink_never_uses_person_heatmap_overlap() -> None:
 
 def test_low_confidence_heatmap_observation_recovers_existing_track() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=3)
-    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, source="swimmer", frame=BLANK_FRAME)
     tracker.update([Detection(108, 200, 168, 250, 0.8)], FRAME_SHAPE, frame=BLANK_FRAME)
     tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
 
@@ -150,9 +198,9 @@ def test_low_confidence_heatmap_observation_recovers_existing_track() -> None:
 
 def test_water_handoff_permanently_excludes_person_only_detections() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=3)
-    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, source="swimmer", frame=BLANK_FRAME)
     handoff = tracker.update(
-        [Detection(108, 200, 168, 250, 0.5, "swimmer")], FRAME_SHAPE, frame=BLANK_FRAME
+        [Detection(108, 200, 168, 250, 0.5, "both")], FRAME_SHAPE, frame=BLANK_FRAME
     )
     assert handoff is not None and tracker.water_locked
 
@@ -175,7 +223,7 @@ def test_streamlit_pipeline_uses_the_same_threshold_as_heatmap_script() -> None:
 
 def test_impossible_jump_creates_another_track_but_not_an_id_switch() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=2)
-    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, source="swimmer", frame=BLANK_FRAME)
     selected_id = tracker.target_id
 
     result = tracker.update([Detection(800, 200, 860, 250, 1.0, "both")], FRAME_SHAPE, frame=BLANK_FRAME)
@@ -187,7 +235,7 @@ def test_impossible_jump_creates_another_track_but_not_an_id_switch() -> None:
 
 def test_prediction_stops_but_botsort_can_still_reacquire() -> None:
     tracker = PersistentSwimmerTracker(max_missed_frames=1, max_reacquire_frames=6)
-    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, source="swimmer", frame=BLANK_FRAME)
 
     assert tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME) is not None
     assert tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME) is None
@@ -235,7 +283,7 @@ def test_detector_integration_uses_public_detect_contract() -> None:
 
 def test_accepts_real_hybrid_detection_type() -> None:
     tracker = PersistentSwimmerTracker()
-    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, frame=BLANK_FRAME)
+    tracker.start_from_box(BBox(100, 200, 160, 250), FRAME_SHAPE, source="swimmer", frame=BLANK_FRAME)
     candidate = HybridDetection(110, 200, 170, 250, 0.8, "both", 0.7, 0.8)
 
     result = tracker.update([candidate], FRAME_SHAPE, frame=BLANK_FRAME)

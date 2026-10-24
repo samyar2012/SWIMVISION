@@ -53,9 +53,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lane-axis", choices=("x", "y"), default="y")
     parser.add_argument("--lane-min", type=float, help="first image-coordinate boundary of the lane")
     parser.add_argument("--lane-max", type=float, help="second image-coordinate boundary of the lane")
-    parser.add_argument("--max-missed", type=int, default=60, help="frames to show motion prediction")
+    parser.add_argument("--max-missed", type=int, default=180, help="frames to retain the selected identity")
     parser.add_argument(
-        "--max-reacquire", type=int, default=90,
+        "--max-reacquire", type=int, default=180,
         help="frames to retain identity after detections stop",
     )
     parser.add_argument("--show", action="store_true", help="show a live preview; press q to stop")
