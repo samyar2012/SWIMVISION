@@ -13,6 +13,7 @@ from core.race_analysis import (
     analyze_race,
     detect_breakouts,
     detect_race_start,
+    detect_stopped_finish,
     detect_turns,
 )
 from core.video import VideoMetadata
@@ -82,6 +83,25 @@ def test_breakout_is_first_plausible_stroke_after_each_underwater_phase():
     assert detect_breakouts(peaks, 0, [30], 70, 10.0) == [8, 45]
 
 
+def test_finish_is_onset_of_sustained_final_stop_not_confirmation_or_clip_end():
+    table = _synthetic_track(1, fps=10.0)
+    # Add one second after the touch. The returned finish must be the first
+    # wall/stop interval, not the frame where the 0.5 s hold becomes known.
+    touch = len(table) - 1
+    wall = table.iloc[-1].copy()
+    tail = []
+    for offset in range(1, 11):
+        row = wall.copy()
+        row.frame_index = touch + offset
+        row.timestamp_s = (touch + offset) / 10.0
+        tail.append(row)
+    table = pd.concat([table, pd.DataFrame(tail)], ignore_index=True)
+    finish, confidence, evidence = detect_stopped_finish(table, 10.0, 20, [])
+    assert touch - 5 <= finish <= touch + 2
+    assert confidence in {"medium", "high"}
+    assert "plateau" in evidence
+
+
 def _write_motion_video(path, table: pd.DataFrame, fps: float = 10.0) -> None:
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (320, 180))
     assert writer.isOpened()
@@ -109,6 +129,9 @@ def test_full_report_round_trip_and_length_metrics(tmp_path):
     assert all(length.distance == 25 and length.unit == "yd" for length in report.lengths)
     assert report.events[0].kind == "start" and report.events[-1].kind == "finish"
     assert [event.frame_index for event in report.events] == sorted(event.frame_index for event in report.events)
+    assert report.technique.metrics
+    assert {"stroke_rhythm", "vertical_path", "arm_path", "breathing", "kick"}.issubset(
+        {metric.key for metric in report.technique.metrics})
     assert any(event.kind == "breakout" for event in report.events)
     assert RaceAnalysis.from_dict(report.to_dict()) == report
     exported = _plain_report(report)
@@ -119,6 +142,20 @@ def test_full_report_round_trip_and_length_metrics(tmp_path):
     records = tmp_path / "records"
     save_analysis(record, records)
     assert load_analysis(record.analysis_id, records).performance == report
+
+
+def test_user_official_time_overrides_displayed_time_but_keeps_video_estimate(tmp_path):
+    race = RaceInfo("Freestyle", 25, "SCY")
+    table = _synthetic_track(1)
+    video = tmp_path / "official.avi"
+    _write_motion_video(video, table)
+    meta = VideoMetadata(fps=10.0, frame_count=len(table), duration_s=len(table) / 10,
+                         width=320, height=180, codec="MJPG")
+    report = analyze_race(video, table, race, meta, official_time_s=12.34)
+    assert report.race_time_s == 12.34
+    assert report.race_time_source == "official_manual"
+    assert report.estimated_race_time_s != report.race_time_s
+    assert "entered by the user" in _plain_report(report).lower()
 
 
 def test_report_never_calls_estimated_tracking_direct_evidence(tmp_path):

@@ -232,3 +232,8 @@ def test_video2_full_race_keeps_selected_lane_identity(
     assert [event.frame_index for event in report.events] == sorted(event.frame_index for event in report.events)
     assert len(report.lengths) == 2
     assert sum(length.distance for length in report.lengths) == 50
+    assert report.finish.confidence in {"medium", "high"}, report.to_dict()
+    assert report.finish.frame_index < frame_index - 1, report.to_dict()
+    assert {"stroke_rhythm", "vertical_path", "cycle_economy", "finish_execution"}.issubset(
+        {metric.key for metric in report.technique.metrics}
+    )

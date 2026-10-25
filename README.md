@@ -3,7 +3,7 @@
 **Turn ordinary swim race footage into measurable performance data.**
 
 > Built for the 2026 Congressional App Challenge.
-> **Status: persistent tracking works on the full Video(2) regression; the first evidence-labelled race-analysis report is now implemented for 25/50/100/200 events.** See the [Roadmap](#roadmap).
+> **Status: persistent tracking works on the full Video(2) regression; evidence-labelled race and visible-technique analysis is implemented for 25/50/100/200 events.** See the [Roadmap](#roadmap).
 
 ## Problem
 
@@ -26,7 +26,9 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 | Temporal swimmer-crop stroke-cycle estimate with explicit confidence/limitations | ✅ First analysis version |
 | Plain-language findings, evidence, example training sets and general nutrition/recovery guidance | ✅ First analysis version |
 | Ordered water-entry and first-stroke breakout estimates, charts, JSON/TXT/CSV exports | ✅ First analysis version |
-| Audio-buzzer timing, wall-contact finish, calibrated pool coordinates and swim-specific pose | Not production-validated |
+| Visible technique analysis: rhythm consistency, vertical body path, cycle economy, turn/breakout consistency, finish execution | ✅ First analysis version |
+| Sustained-stop finish estimate plus optional user-entered official race time | ✅ First analysis version |
+| Audio-buzzer timing, exact wall-contact frame, calibrated pool coordinates and swim-specific pose | Not production-validated |
 
 ## How Phase 2 works
 
@@ -51,8 +53,8 @@ flowchart LR
     P --> O[annotated video]
     P --> ST[(storage/analyses.py<br/>local JSON + CSV)]
     ST --> TR
-    ST --> RA[core/race_analysis.py<br/>events, turns, splits, stroke signal]
-    RA --> UI[ui/analysis.py<br/>findings, sets, fuel, evidence]
+    ST --> RA[core/race_analysis.py<br/>events, finish stop, technique signals]
+    RA --> UI[ui/analysis.py<br/>technique, findings, sets, evidence]
 ```
 
 **Design rules**
@@ -122,16 +124,21 @@ After tracking, click **Analyze my race**. The report supports every valid indiv
 200 yard/metre event in SCY, SCM and LCM, plus 100/200 short-course IM and 200 long-course IM. It uses
 the tracker's deck-to-water state change to anchor takeoff, requires the correct number of direction
 reversals before showing per-length splits, and analyses a temporal sequence of swimmer-only crops for
-stroke rhythm. It never fills missing turns by dividing the race evenly.
+stroke rhythm. It never fills missing turns by dividing the race evenly. Near the end of the final length, it
+looks for at least 0.5 seconds of sustained low movement and places the estimated finish at the onset of that
+stop. The swimmer can instead enter an official race time from a meet result or stopwatch; the app keeps the
+automatic video estimate beside it rather than overwriting the evidence.
 
-The report has five plain-language tabs: summary, splits and strokes, training ideas, fuel and recovery,
-and the exact frame-level evidence. Training and food suggestions are clearly identified as general
-examples rather than prescriptions.
+The report has six plain-language tabs. Its Technique tab reports repeatable signals that this camera can support:
+stroke-timing consistency, vertical body-path control, first-to-last cycle economy, turn/breakout consistency and
+finish execution. Catch/elbow angles, breathing mechanics and kick mechanics are explicitly marked **not measured**
+until a swimming-specific pose layer is available. Training and food suggestions are general examples, not prescriptions.
 
 The analysis structure follows published work from
 [SwimTrack](https://ceur-ws.org/Vol-3583/paper38.pdf),
 [DeepDASH](https://ashwhall.github.io/download/Hall2020_Article_TheDetectionTrackingAndTempora.pdf),
-and [stroke-rate estimation from race video](https://arxiv.org/abs/2104.12056). Nutrition language uses
+and [stroke-rate estimation from race video](https://arxiv.org/abs/2104.12056). The pose-analysis boundary is informed by
+[swimming-pose research](https://openaccess.thecvf.com/content_CVPRW_2019/html/CVSports/Zecha_Refining_Joint_Locations_for_Human_Pose_Tracking_in_Sports_Videos_CVPRW_2019_paper.html): splash, self-occlusion and refraction require swimming-specific temporal correction. Nutrition language uses
 food-first resources from [USA Swimming](https://www.usaswimming.org/parents/popular-resources/nutrition-and-recovery),
 [USOPC](https://www.usopc.org/nutrition) and
 [USADA](https://www.usada.org/athletes/substances/nutrition-guide/).
@@ -146,7 +153,8 @@ The exact ready/not-ready submission checklist is in
 - Long camera cutaways can outlast identity memory. The tracker reports those frames as lost instead of silently choosing a different person.
 - Watch the annotated video once to confirm that the box stayed on the intended swimmer.
 - Takeoff is inferred from the deck-to-water transition. Audio-buzzer reaction time is not implemented.
-- Finish currently uses the last tracked frame and is marked low confidence until wall-contact detection exists.
+- Finish uses the onset of a sustained late-race stop when visible, otherwise the last tracked frame. It is still an estimate, not an electronic touchpad time.
+- Technique analysis currently measures temporal/path proxies. Anatomical arm, breathing and kick analysis requires a swim-specific pose model and appropriate camera view.
 - Stroke cycles use a deterministic crop-motion signal, not a trained swim-pose model, and are marked for review.
 - Per-length splits are withheld if all expected turns are not visible. Distance calibration and moving-camera
   registration remain future validation work.
@@ -171,8 +179,8 @@ Generative AI was used to help write this project. See [AI_USAGE.md](AI_USAGE.md
 2. **Phase 2 (validating)** One visual selection, hybrid persistent tracking, annotated video, honest loss reporting
 3. Phase 3 ✅ first version: temporal crop motion and stroke-cycle signal
 4. Phase 4 ✅ first version: stroke count/rate with visible confidence warnings
-5. Phase 5 🚧: takeoff and turns implemented; audio start, breakout and wall-contact finish next
-6. Phase 6 ✅ first version: five-tab user-friendly analysis and evidence dashboard
+5. Phase 5 🚧: takeoff, turns and sustained-stop finish estimate implemented; audio start and exact wall contact next
+6. Phase 6 ✅ first version: six-tab technique, race analysis and evidence dashboard
 7. Phase 7 🚧: expected-turn logic implemented; camera registration and pool calibration next
 8. Phase 8: Race comparison
 9. Phase 9: AI Coach

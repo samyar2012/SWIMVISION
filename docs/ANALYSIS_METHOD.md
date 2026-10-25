@@ -23,6 +23,14 @@ and trained models differ.
    unexplained universal target. Every event retains a source frame, timestamp, confidence and evidence sentence.
 7. Training sets are examples tied to a measured finding. Nutrition is food-first, general guidance only; the app
    does not prescribe calories, weight change, supplements or medical diets.
+8. Finish detection searches only the latter half of the final length for at least 0.5 seconds of low normalized
+   centre motion preceded by clear movement. It reports the onset of the stationary plateau, not the later frame
+   where the hold was confirmed. If that evidence is absent, it visibly falls back to the final tracked frame.
+9. A user may enter an official race time. That value is stored with source `official_manual`; the independent
+   automatic video estimate and event timestamps are retained for review.
+10. Technique analysis is limited to signals supported by the current tracked region: cycle-timing consistency,
+    detrended vertical body-path motion, within-race cycle-economy retention, turn-to-breakout consistency and the
+    final movement-to-stop transition. Joint angles, breathing and kick mechanics are returned as not measurable.
 
 ## Research mapping
 
@@ -35,18 +43,22 @@ and trained models differ.
 | [Swimming Stroke Rate Analysis](https://github.com/agvdndor/Swimming-Stroke-Rate-Analysis) | Treat strokes as a cyclic sequence and use temporal consistency rather than independent frame guesses. |
 | [In-field swimming-analysis validation study](https://pmc.ncbi.nlm.nih.gov/articles/PMC11598412/) | Use frame-level operational definitions for takeoff, water entry, breakout, turn and split validation. |
 | [Dronaquatics](https://openaccess.thecvf.com/content/WACV2026/papers/Tran_Dronaquatics_Real-time_Swimming_Analytics_Using_Drone_Captured_Imagery_WACV_2026_paper.pdf) | Keep pose/stroke classification, optical-flow speed and lap timing as complementary signals. |
+| [Refining Joint Locations for Human Pose Tracking in Sports Videos](https://openaccess.thecvf.com/content_CVPRW_2019/html/CVSports/Zecha_Refining_Joint_Locations_for_Human_Pose_Tracking_in_Sports_Videos_CVPRW_2019_paper.html) | Swimming pose needs temporal correction for joint swaps and outliers; a generic box or one-frame pose must not be presented as biomechanics. |
+| [Pose Estimation for Deriving Kinematic Parameters of Competitive Swimmers](https://doi.org/10.2352/ISSN.2470-1173.2017.16.CVAS-345) | Stroke and kick technique require pose/key-frame evidence; bubbles, splash, reflections and self-occlusion make generic pose unreliable. |
 | [SAM 3](https://proceedings.iclr.cc/paper_files/paper/2026/hash/e0982cbc81401df3430ee1ff780dc7a2-Abstract-Conference.html) | Potential future promptable segmentation/tracking component only. It is not a swimming-analysis paper and is not presented as one. |
 
 ## Validation gates before stronger claims
 
 - **Start:** add audio extraction and buzzer detection, then validate takeoff and reaction-time frame tolerances.
-- **Finish:** train or implement visible wall-contact detection rather than using the final tracked frame.
+- **Finish:** validate the sustained-stop onset against labelled touch frames, then add visible hand/wall contact detection.
 - **Breakout/underwater:** add water-entry, head-breakout and first-stroke labels following the validation study.
 - **Stroke count:** create reviewed stroke-event annotations for every stroke and camera style, then measure precision,
   recall and timing error. The current crop-motion number stays visibly provisional.
 - **Distance and speed:** register pool landmarks across camera movement before calling pixel motion physical velocity.
 - **Coaching:** validate that every recommendation is traceable to a measured result and let a qualified coach review
   age-appropriate volume and rest.
+- **Technique:** train swimming-specific side/front pose models, add temporal joint correction, and validate each
+  stroke phase and joint-angle metric against coach-reviewed labels before enabling arm/breath/kick claims.
 
 ## Nutrition sources
 

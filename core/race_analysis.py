@@ -30,7 +30,7 @@ from core.errors import SwimVisionError
 from core.models import IM_ORDER, RaceInfo
 from core.video import VideoMetadata
 
-ANALYSIS_FORMAT_VERSION = 1
+ANALYSIS_FORMAT_VERSION = 2
 SUPPORTED_ANALYSIS_DISTANCES = (25, 50, 100, 200)
 ProgressFn = Callable[[int, int], None]
 
@@ -78,6 +78,28 @@ class TrainingSet:
 
 
 @dataclass(frozen=True)
+class TechniqueMetric:
+    """One visible technique signal, or an honest statement that it was not visible."""
+
+    key: str
+    label: str
+    rating: str  # "good", "improve", "check", or "not_measurable"
+    confidence: str
+    value: str
+    explanation: str
+    action: str
+    evidence: str
+
+
+@dataclass(frozen=True)
+class TechniqueAnalysis:
+    summary: str
+    metrics: tuple[TechniqueMetric, ...]
+    directly_measured: tuple[str, ...]
+    not_measurable: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RaceAnalysis:
     race_label: str
     status: str
@@ -86,11 +108,14 @@ class RaceAnalysis:
     events: tuple[RaceEvent, ...]
     lengths: tuple[LengthMetrics, ...]
     race_time_s: float
+    race_time_source: str
+    estimated_race_time_s: float
     stroke_cycles: int | None
     arm_strokes: int | None
     average_stroke_rate_spm: float | None
     track_observed_fraction: float
     findings: tuple[Finding, ...]
+    technique: TechniqueAnalysis
     training_sets: tuple[TrainingSet, ...]
     nutrition_tips: tuple[str, ...]
     limitations: tuple[str, ...]
@@ -109,10 +134,18 @@ class RaceAnalysis:
             events=tuple(RaceEvent(**e) for e in data["events"]),
             lengths=tuple(LengthMetrics(**m) for m in data["lengths"]),
             race_time_s=float(data["race_time_s"]),
+            race_time_source=data["race_time_source"],
+            estimated_race_time_s=float(data["estimated_race_time_s"]),
             stroke_cycles=data.get("stroke_cycles"), arm_strokes=data.get("arm_strokes"),
             average_stroke_rate_spm=data.get("average_stroke_rate_spm"),
             track_observed_fraction=float(data["track_observed_fraction"]),
             findings=tuple(Finding(**f) for f in data["findings"]),
+            technique=TechniqueAnalysis(
+                summary=data["technique"]["summary"],
+                metrics=tuple(TechniqueMetric(**m) for m in data["technique"]["metrics"]),
+                directly_measured=tuple(data["technique"]["directly_measured"]),
+                not_measurable=tuple(data["technique"]["not_measurable"]),
+            ),
             training_sets=tuple(TrainingSet(**s) for s in data["training_sets"]),
             nutrition_tips=tuple(data["nutrition_tips"]),
             limitations=tuple(data["limitations"]),
@@ -265,6 +298,78 @@ def detect_turns(table: pd.DataFrame, expected: int, fps: float, width: int,
         if best is None or score > best[0]:
             best = score, choice
     return [c[0] for c in best[1]] if best else []
+
+
+def detect_stopped_finish(table: pd.DataFrame, fps: float, start_pos: int,
+                          turns: list[int]) -> tuple[int, str, str]:
+    """Find the onset of a sustained stop in the final part of the race.
+
+    A decision is made only after at least 0.5 seconds of low centre motion,
+    but the returned frame is the *start* of that stationary plateau. This is
+    the offline equivalent of subtracting the detector's confirmation delay.
+    Earlier pauses cannot become finishes because only the latter half of the
+    final length is searched.
+    """
+    n = len(table)
+    fallback = n - 1
+    if n < max(10, int(round(fps))):
+        return fallback, "low", "clip ended before a sustained wall stop could be checked"
+
+    x = _moving_average(table.cx.to_numpy(float), max(3, int(round(0.20 * fps))))
+    y = _moving_average(table.cy.to_numpy(float), max(3, int(round(0.20 * fps))))
+    widths = (table.x2 - table.x1).to_numpy(float)
+    heights = (table.y2 - table.y1).to_numpy(float)
+    body_scale = np.maximum(8.0, np.hypot(widths, heights))
+    lag = max(1, int(round(0.20 * fps)))
+    speed = np.full(n, np.inf, dtype=float)
+    speed[lag:] = np.hypot(x[lag:] - x[:-lag], y[lag:] - y[:-lag]) / (lag / fps)
+    speed[lag:] /= body_scale[lag:]
+    speed = _moving_average(speed, max(1, int(round(0.15 * fps))))
+
+    final_leg_start = turns[-1] if turns else start_pos
+    search_start = final_leg_start + int(round((fallback - final_leg_start) * 0.50))
+    confirmation = max(2, int(round(0.50 * fps)))
+    moving_window = max(2, int(round(0.75 * fps)))
+
+    # Anchor the stop to the end of the clip: a finished swimmer may still
+    # move arms, breathe and make the detector box jitter even though their
+    # position at the wall is constant. A body-relative spatial plateau is
+    # therefore more robust than requiring near-zero instantaneous speed.
+    tail = slice(max(search_start, n - confirmation), n)
+    anchor_x, anchor_y = float(np.median(x[tail])), float(np.median(y[tail]))
+    anchor_scale = float(np.median(body_scale[tail]))
+    within_wall_area = np.hypot(x - anchor_x, y - anchor_y) <= max(6.0, 0.20 * anchor_scale)
+    scores = np.convolve(within_wall_area.astype(float), np.ones(confirmation), mode="valid") / confirmation
+    qualified = scores >= 0.80
+    last_window = n - confirmation
+    if last_window < len(qualified) and qualified[last_window]:
+        onset = last_window
+        # Find the beginning of the trailing chain of qualified half-second
+        # windows. One brief jitter does not destroy the entire plateau.
+        misses = 0
+        for pos in range(last_window - 1, search_start - 1, -1):
+            if qualified[pos]:
+                onset, misses = pos, 0
+            else:
+                misses += 1
+                if misses > max(1, int(round(0.10 * fps))):
+                    break
+        before = slice(max(lag, onset - moving_window), onset)
+        approach_displacement = (
+            float(np.hypot(np.median(x[before]) - anchor_x, np.median(y[before]) - anchor_y))
+            / max(8.0, anchor_scale)
+            if onset > max(lag, search_start) else 0.0
+        )
+        approach_speed = float(np.median(speed[before])) if onset > max(lag, search_start) else 0.0
+        if approach_displacement >= 0.18 or approach_speed >= 0.24:
+            hold_s = (n - onset) / fps
+            confidence = "high" if hold_s >= 0.8 else "medium"
+            return (
+                onset,
+                confidence,
+                f"position stayed at the wall for {hold_s:.2f} seconds near the end; finish is the start of that plateau",
+            )
+    return fallback, "low", "no defensible sustained stop was found; using the final tracked frame"
 
 
 def _crop_motion_signal(video_path: Path, table: pd.DataFrame,
@@ -492,15 +597,207 @@ def _coach(race: RaceInfo, lengths: list[LengthMetrics], observed_fraction: floa
     return tuple(findings), tuple(sets[:3])
 
 
+def _technique_analysis(
+    race: RaceInfo,
+    track: pd.DataFrame,
+    fps: float,
+    start: int,
+    finish: int,
+    turns: list[int],
+    breakouts: list[int],
+    peaks: list[int],
+    lengths: list[LengthMetrics],
+    finish_confidence: str,
+) -> TechniqueAnalysis:
+    """Turn observable temporal signals into conservative technique feedback.
+
+    These are within-swim comparisons, not population norms. No joint angle is
+    reported because the current detector supplies a swimmer region rather
+    than reliable anatomical keypoints.
+    """
+    metrics: list[TechniqueMetric] = []
+
+    # Same-arm cycle timing is the clearest technique signal in the current
+    # pipeline. Never bridge an interval across a wall turn.
+    intervals = [
+        (b - a) / fps
+        for a, b in zip(peaks, peaks[1:])
+        if not any(a < turn < b for turn in turns)
+    ]
+    if len(intervals) >= 3:
+        interval_cv = float(np.std(intervals) / max(1e-6, np.mean(intervals)))
+        if interval_cv <= 0.12:
+            rating, cue = "good", "Keep the same patient rhythm when speed increases."
+        elif interval_cv <= 0.22:
+            rating, cue = "check", "Use a tempo cue and make each cycle match the one before it."
+        else:
+            rating, cue = "improve", "Use short smooth repeats with a tempo cue before adding speed."
+        metrics.append(TechniqueMetric(
+            "stroke_rhythm", "Stroke rhythm consistency", rating, "medium",
+            f"{interval_cv * 100:.0f}% cycle-timing variation",
+            "This compares the spacing between detected stroke cycles; lower variation means a more repeatable rhythm.",
+            cue, f"{len(intervals) + 1} detected cycles, excluding intervals that cross a turn",
+        ))
+    else:
+        metrics.append(TechniqueMetric(
+            "stroke_rhythm", "Stroke rhythm consistency", "not_measurable", "low", "Not enough visible cycles",
+            "The video did not contain enough defensible cycle events for a rhythm judgment.",
+            "Use a clear side view with the full recovery visible.", "Fewer than four usable stroke cycles",
+        ))
+
+    # Remove slow camera motion from the vertical centre path. The remainder is
+    # a body-path proxy, not a hip/shoulder angle measurement.
+    active = np.zeros(len(track), dtype=bool)
+    boundaries = [*turns, finish]
+    starts = breakouts if breakouts else [start]
+    for begin, end in zip(starts, boundaries):
+        active[begin:max(begin, end - max(1, int(round(0.5 * fps))))] = True
+    y = _moving_average(track.cy.to_numpy(float), max(3, int(round(0.20 * fps))))
+    drift = _moving_average(y, max(5, int(round(1.50 * fps))))
+    body_height = float(np.median((track.y2 - track.y1).to_numpy(float)))
+    vertical_rms = float(np.sqrt(np.mean(np.square((y - drift)[active]))) / max(8.0, body_height)) if active.any() else np.nan
+    if np.isfinite(vertical_rms) and race.stroke in {"Freestyle", "Backstroke"}:
+        if vertical_rms <= 0.06:
+            rating, cue = "good", "Keep the head quiet and connect rotation around this stable line."
+        elif vertical_rms <= 0.11:
+            rating, cue = "check", "Check for head lift or a dropping hip when breathing and when fatigue starts."
+        else:
+            rating, cue = "improve", "Try side-kick and six-kick-switch drills while keeping the crown of the head still."
+        metrics.append(TechniqueMetric(
+            "vertical_path", "Vertical body-path control", rating, "medium",
+            f"{vertical_rms * 100:.1f}% of tracked body height",
+            "This measures fast up-and-down movement of the tracked swimmer after removing slow camera drift.",
+            cue, "Tracked centre path during surface swimming; it is not a measured hip angle",
+        ))
+    elif race.stroke in {"Breaststroke", "Butterfly"} and np.isfinite(vertical_rms):
+        metrics.append(TechniqueMetric(
+            "vertical_path", "Vertical body-path pattern", "check", "low",
+            f"{vertical_rms * 100:.1f}% of tracked body height",
+            "The natural rise and fall of this stroke is visible, but one above-water camera cannot label it good or bad.",
+            "Review the high and low points with a coach alongside the stroke phases.",
+            "Tracked centre path only; breaststroke and butterfly require phase-aware pose analysis",
+        ))
+    else:
+        metrics.append(TechniqueMetric(
+            "vertical_path", "Vertical body-path control", "not_measurable", "low", "Not available",
+            "The current view does not support a defensible body-line judgment.",
+            "Use a stable side view and analyse each IM stroke separately.", "No comparable surface-swimming segment",
+        ))
+
+    comparable = [item for item in lengths if item.distance_per_cycle is not None]
+    if len(comparable) >= 2:
+        first, last = comparable[0].distance_per_cycle, comparable[-1].distance_per_cycle
+        assert first is not None and last is not None
+        change = (last - first) / max(1e-6, first)
+        if change >= -0.08:
+            rating, cue = "good", "Keep pairing this cycle length with controlled tempo."
+        elif change >= -0.16:
+            rating, cue = "check", "Count cycles on race-pace repeats and keep the final length within one cycle of the first."
+        else:
+            rating, cue = "improve", "Use count-and-hold repeats; stop the set when the stroke shortens."
+        metrics.append(TechniqueMetric(
+            "cycle_economy", "Cycle economy under fatigue", rating, "low",
+            f"{change * 100:+.0f}% first-to-last distance per cycle",
+            "This checks whether the swimmer needed shorter cycles late in the race.",
+            cue, "Pool distance divided by detected cycles; underwater distance is included",
+        ))
+    else:
+        metrics.append(TechniqueMetric(
+            "cycle_economy", "Cycle economy under fatigue", "not_measurable", "low", "Not enough complete lengths",
+            "At least two trustworthy length cycle counts are required.",
+            "Use footage with both walls visible and a clear surface stroke.", "Fewer than two comparable length counts",
+        ))
+
+    turn_breakouts = breakouts[1:] if len(breakouts) > 1 else []
+    underwater_times = [
+        float(track.iloc[out].timestamp_s - track.iloc[turn].timestamp_s)
+        for turn, out in zip(turns, turn_breakouts)
+        if out > turn
+    ]
+    if len(underwater_times) >= 2:
+        variation = float(np.std(underwater_times) / max(1e-6, np.mean(underwater_times)))
+        rating = "good" if variation <= 0.15 else "improve"
+        metrics.append(TechniqueMetric(
+            "turn_consistency", "Turn and breakout consistency", rating, "low",
+            f"{variation * 100:.0f}% timing variation across {len(underwater_times)} turns",
+            "This compares time from direction reversal to the first detected surface cycle.",
+            "Rehearse the same turn, push, streamline and first-stroke sequence at every wall.",
+            "Direction reversals plus low-confidence first-cycle breakout estimates",
+        ))
+    elif turns:
+        value = f"{underwater_times[0]:.2f} s to first cycle" if underwater_times else "Breakout not visible"
+        metrics.append(TechniqueMetric(
+            "turn_consistency", "Turn and breakout execution", "check", "low", value,
+            "One turn can be timed, but consistency cannot be judged from a single repetition.",
+            "Review whether speed carries through the wall and the first stroke begins without lifting the head.",
+            "One detected direction reversal; breakout remains an estimate",
+        ))
+    else:
+        metrics.append(TechniqueMetric(
+            "turn_consistency", "Turn and breakout execution", "not_measurable", "low", "No turn in this event",
+            "A one-length event has no wall turn to compare.", "Use a longer race or a dedicated turn clip.",
+            "Race structure contains zero turns",
+        ))
+
+    finish_detected = finish_confidence in {"medium", "high"}
+    metrics.append(TechniqueMetric(
+        "finish_execution", "Finish execution",
+        "good" if finish_detected else "check",
+        finish_confidence,
+        "Sustained wall stop found" if finish_detected else "Wall stop not confirmed",
+        "A clean transition from forward movement to a stationary wall position was detected." if finish_detected
+        else "The clip did not show a clear sustained stop, so wall contact cannot be judged.",
+        "Keep accelerating into the wall; do not glide early. Confirm the touch frame in the video." if finish_detected
+        else "Keep the wall and at least one second after the touch in frame.",
+        "Tracked centre motion in the latter half of the final length",
+    ))
+
+    for key, label, explanation, action in (
+        ("arm_path", "Catch and arm-path angles",
+         "The tracker follows the swimmer region but does not yet locate shoulder, elbow and wrist joints reliably through splash.",
+         "A swim-specific pose model and a clearer side/underwater view are required."),
+        ("breathing", "Breathing timing and head angle",
+         "A bounding box cannot distinguish a breath from body roll without reliable face and shoulder keypoints.",
+         "Use a close side view; this becomes measurable when the pose layer is added."),
+        ("kick", "Kick timing and ankle depth",
+         "The legs are frequently submerged or outside the tracked region, so kick mechanics would be a guess.",
+         "Use an underwater side view and a swimming-trained ankle detector."),
+    ):
+        metrics.append(TechniqueMetric(
+            key, label, "not_measurable", "low", "Not measured", explanation, action,
+            "Required anatomical keypoints are not produced by the current model",
+        ))
+
+    good = sum(metric.rating == "good" for metric in metrics)
+    improve = sum(metric.rating == "improve" for metric in metrics)
+    if improve:
+        summary = f"The video shows {good} stable technique signal(s) and {improve} measurable area(s) to improve."
+    elif good:
+        summary = f"The visible signals are mostly controlled, with {good} measurable strength(s); unavailable details are not guessed."
+    else:
+        summary = "The video supports limited technique measurement; unavailable details are not guessed."
+    measured = tuple(metric.label for metric in metrics if metric.rating != "not_measurable")
+    unavailable = tuple(metric.label for metric in metrics if metric.rating == "not_measurable")
+    return TechniqueAnalysis(summary, tuple(metrics), measured, unavailable)
+
+
 def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
-                 meta: VideoMetadata, progress: ProgressFn | None = None) -> RaceAnalysis:
+                 meta: VideoMetadata, progress: ProgressFn | None = None,
+                 official_time_s: float | None = None) -> RaceAnalysis:
     """Create an evidence-backed report for a tracked 25/50/100/200 race."""
     if race.distance not in SUPPORTED_ANALYSIS_DISTANCES:
         raise SwimVisionError("Race analysis currently supports 25, 50, 100 and 200 yard/metre events.")
     track = _filled_track(table)
+    if official_time_s is not None and (not np.isfinite(official_time_s) or official_time_s <= 0):
+        raise SwimVisionError("The entered official race time must be greater than zero seconds.")
     sample_fps = 1.0 / max(1e-6, float(np.median(np.diff(track.timestamp_s.to_numpy(float)))))
     start_pos, start_confidence, start_evidence = detect_race_start(track, sample_fps, meta.width, meta.height)
-    finish_pos = len(track) - 1
+    clip_end_pos = len(track) - 1
+    turn_positions = detect_turns(track, race.turns, sample_fps, meta.width, start_pos, clip_end_pos)
+    finish_pos, finish_confidence, finish_evidence = detect_stopped_finish(
+        track, sample_fps, start_pos, turn_positions)
+    # Re-evaluate turns without any post-finish footage. This prevents movement
+    # after the touch from becoming a false direction reversal.
     turn_positions = detect_turns(track, race.turns, sample_fps, meta.width, start_pos, finish_pos)
 
     def event(kind: str, label: str, pos: int, confidence: str, evidence: str) -> RaceEvent:
@@ -508,8 +805,7 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
         return RaceEvent(kind, label, int(row.frame_index), round(float(row.timestamp_s), 4), confidence, evidence)
 
     start = event("start", "Estimated takeoff", start_pos, start_confidence, start_evidence)
-    finish = event("finish", "Finish", finish_pos, "low",
-                   "last tracked frame; wall-contact verification is not available yet")
+    finish = event("finish", "Estimated finish", finish_pos, finish_confidence, finish_evidence)
     turns = tuple(event("turn", f"Turn {n}", pos, "medium",
                         "sustained approach followed by a direction reversal")
                   for n, pos in enumerate(turn_positions, start=1))
@@ -556,7 +852,11 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
             ))
 
     observed_fraction = float((track.status == "tracked").mean())
-    race_time = max(0.0, finish.timestamp_s - start.timestamp_s)
+    estimated_race_time = max(0.0, finish.timestamp_s - start.timestamp_s)
+    race_time = float(official_time_s) if official_time_s is not None else estimated_race_time
+    race_time_source = "official_manual" if official_time_s is not None else (
+        "estimated_wall_stop" if finish_confidence in {"medium", "high"} else "estimated_clip_end"
+    )
     first_breakout = breakout_positions[0] if breakout_positions else start_pos
     counted_peaks = [peak for peak in peaks if peak >= first_breakout]
     total_cycles = len(counted_peaks) or None
@@ -566,13 +866,22 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
     )
     arm_strokes = total_cycles * 2 if total_cycles and race.stroke in {"Freestyle", "Backstroke"} else total_cycles
     findings, sets = _coach(race, lengths, observed_fraction, bool(peaks))
+    technique = _technique_analysis(
+        race, track, sample_fps, start_pos, finish_pos, turn_positions,
+        breakout_positions, peaks, lengths, finish_confidence,
+    )
     limitations = [
         "Takeoff is inferred from the deck-to-water handoff or sustained movement; audio-buzzer timing is not implemented yet.",
-        "Finish currently uses the final tracked frame and must be treated as provisional.",
+        ("Finish is estimated from the onset of a sustained stop near the end; confirm the wall-touch frame."
+         if finish_confidence in {"medium", "high"}
+         else "No sustained wall stop was found, so finish falls back to the final tracked frame."),
         "Stroke cycles come from swimmer-crop motion, not a swim-specific pose model; review them before acting.",
         "Breakout is the first detected stroke-cycle after entry/turn, not calibrated head passage through a pool-distance mark.",
         "Distance per cycle is pool-length distance divided by detected cycles; it includes underwater distance and is not biomechanical stroke length.",
+        "Joint angles, breathing mechanics and kick mechanics are withheld until a swimming-specific pose model is available.",
     ]
+    if official_time_s is not None:
+        limitations.append("The displayed official time was entered by the user; automatic event timestamps remain video estimates.")
     if not complete_lengths:
         limitations.append(f"Detected {len(turn_positions)} of {race.turns} expected turns, so per-length splits are withheld.")
     if race.stroke == "Individual Medley":
@@ -585,8 +894,10 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
     return RaceAnalysis(
         race_label=race.label, status=status, start=start, finish=finish,
         events=ordered_events,
-        lengths=tuple(lengths), race_time_s=round(race_time, 3), stroke_cycles=total_cycles,
+        lengths=tuple(lengths), race_time_s=round(race_time, 3), race_time_source=race_time_source,
+        estimated_race_time_s=round(estimated_race_time, 3), stroke_cycles=total_cycles,
         arm_strokes=arm_strokes, average_stroke_rate_spm=round(average_rate, 1) if average_rate else None,
-        track_observed_fraction=round(observed_fraction, 4), findings=findings, training_sets=sets,
+        track_observed_fraction=round(observed_fraction, 4), findings=findings, technique=technique,
+        training_sets=sets,
         nutrition_tips=_nutrition_tips(), limitations=tuple(limitations),
     )
