@@ -3,7 +3,7 @@
 **Turn ordinary swim race footage into measurable performance data.**
 
 > Built for the 2026 Congressional App Challenge.
-> **Status: Phase 1 done; Phase 2 uses a hybrid persistent tracker and is being validated on real footage.** No stroke or race metrics exist yet. See the [Roadmap](#roadmap).
+> **Status: persistent tracking works on the full Video(2) regression; the first evidence-labelled race-analysis report is now implemented for 25/50/100/200 events.** See the [Roadmap](#roadmap).
 
 ## Problem
 
@@ -22,7 +22,10 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 | Choose the swimmer visually with one rectangle—no frame numbers or coordinates | ✅ Phase 2 |
 | Hybrid YOLO + swimmer U-Net detection with persistent identity and gap prediction | ✅ Phase 2 (validating) |
 | Annotated tracking video + per-frame CSV | ✅ Phase 2 |
-| Pose, strokes, events, dashboard, calibration, comparison, AI coach, validation | Phases 3-10 |
+| Automatic takeoff estimate, expected-turn detection and per-length splits for 25/50/100/200 | ✅ First analysis version |
+| Temporal swimmer-crop stroke-cycle estimate with explicit confidence/limitations | ✅ First analysis version |
+| Plain-language findings, evidence, example training sets and general nutrition/recovery guidance | ✅ First analysis version |
+| Audio-buzzer timing, wall-contact finish, calibrated pool coordinates and swim-specific pose | Next validation phases |
 
 ## How Phase 2 works
 
@@ -47,6 +50,8 @@ flowchart LR
     P --> O[annotated video]
     P --> ST[(storage/analyses.py<br/>local JSON + CSV)]
     ST --> TR
+    ST --> RA[core/race_analysis.py<br/>events, turns, splits, stroke signal]
+    RA --> UI[ui/analysis.py<br/>findings, sets, fuel, evidence]
 ```
 
 **Design rules**
@@ -110,13 +115,38 @@ In the app: upload the video, move the time slider, draw one box around the swim
 
 Tests: `.\.venv\Scripts\python.exe -m pytest`
 
+## Race analysis
+
+After tracking, click **Analyze my race**. The report supports every valid individual 25, 50, 100 and
+200 yard/metre event in SCY, SCM and LCM, plus 100/200 short-course IM and 200 long-course IM. It uses
+the tracker's deck-to-water state change to anchor takeoff, requires the correct number of direction
+reversals before showing per-length splits, and analyses a temporal sequence of swimmer-only crops for
+stroke rhythm. It never fills missing turns by dividing the race evenly.
+
+The report has five plain-language tabs: summary, splits and strokes, training ideas, fuel and recovery,
+and the exact frame-level evidence. Training and food suggestions are clearly identified as general
+examples rather than prescriptions.
+
+The analysis structure follows published work from
+[SwimTrack](https://ceur-ws.org/Vol-3583/paper38.pdf),
+[DeepDASH](https://ashwhall.github.io/download/Hall2020_Article_TheDetectionTrackingAndTempora.pdf),
+and [stroke-rate estimation from race video](https://arxiv.org/abs/2104.12056). Nutrition language uses
+food-first resources from [USA Swimming](https://www.usaswimming.org/parents/popular-resources/nutrition-and-recovery),
+[USOPC](https://www.usopc.org/nutrition) and
+[USADA](https://www.usada.org/athletes/substances/nutrition-guide/).
+The complete source-to-feature map and validation gates are in
+[docs/ANALYSIS_METHOD.md](docs/ANALYSIS_METHOD.md).
+
 ## Current limitations
 
-- **No swimming metrics yet.** Phase 2 only locates the swimmer.
 - Hybrid tracking is still being validated across different pool angles, lighting and camera motion.
 - Long camera cutaways can outlast identity memory. The tracker reports those frames as lost instead of silently choosing a different person.
 - Watch the annotated video once to confirm that the box stayed on the intended swimmer.
-- Positions are in **pixels**, not metres/yards (needs calibration, later phase).
+- Takeoff is inferred from the deck-to-water transition. Audio-buzzer reaction time is not implemented.
+- Finish currently uses the last tracked frame and is marked low confidence until wall-contact detection exists.
+- Stroke cycles use a deterministic crop-motion signal, not a trained swim-pose model, and are marked for review.
+- Per-length splits are withheld if all expected turns are not visible. Distance calibration and moving-camera
+  registration remain future validation work.
 - Non-MP4/H.264 uploads (MOV, AVI, HEVC) are shown through a re-encoded preview; the original file is always analysed.
 - Variable-frame-rate videos use the container's average FPS. Upload limit is 1 GB (`.streamlit/config.toml`).
 
@@ -136,11 +166,11 @@ Generative AI was used to help write this project. See [AI_USAGE.md](AI_USAGE.md
 
 1. **Phase 1 ✅** Setup, upload, metadata, playback
 2. **Phase 2 (validating)** One visual selection, hybrid persistent tracking, annotated video, honest loss reporting
-3. Phase 3: Pose estimation
-4. Phase 4: Stroke signal, stroke count, stroke rate
-5. Phase 5: Start / breakout / finish (hybrid auto + manual)
-6. Phase 6: Dashboard, clips, overlay video
-7. Phase 7: Turns, distance calibration
+3. Phase 3 ✅ first version: temporal crop motion and stroke-cycle signal
+4. Phase 4 ✅ first version: stroke count/rate with visible confidence warnings
+5. Phase 5 🚧: takeoff and turns implemented; audio start, breakout and wall-contact finish next
+6. Phase 6 ✅ first version: five-tab user-friendly analysis and evidence dashboard
+7. Phase 7 🚧: expected-turn logic implemented; camera registration and pool calibration next
 8. Phase 8: Race comparison
 9. Phase 9: AI Coach
 10. Phase 10: Validation, performance tuning, documentation

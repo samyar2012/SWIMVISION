@@ -10,7 +10,11 @@ import pytest
 import config
 from core.geometry import BBox
 from core.hybrid_detector import HybridSwimmerDetector
+from core.models import RaceInfo
+from core.race_analysis import analyze_race
+from core.sam2_tracking import FrameResult, results_table
 from core.swimmer_tracker import PersistentSwimmerTracker, PersistentVisualSwimmerTracker, TrackedSwimmer
+from core.video import read_video_metadata
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -168,6 +172,7 @@ def test_video2_full_race_keeps_selected_lane_identity(
     observed = estimated = 0
     longest_gap = prediction_gap = 0
     final_result = None
+    analysis_frames: list[FrameResult] = []
     frame_index = 0
     try:
         while True:
@@ -192,6 +197,12 @@ def test_video2_full_race_keeps_selected_lane_identity(
                 prediction_gap = 0
             if frame_index in identity_regions and final_result is not None:
                 checkpoints[frame_index] = final_result
+            analysis_frames.append(FrameResult(
+                frame_index=frame_index, timestamp_s=frame_index / 29.98166259168704,
+                box=final_result.box if final_result else None, mask_pixels=0,
+                source=final_result.source if final_result else "",
+                predicted=final_result.predicted if final_result else False,
+            ))
             frame_index += 1
     finally:
         video.release()
@@ -208,3 +219,13 @@ def test_video2_full_race_keeps_selected_lane_identity(
         assert region.y1 <= checkpoints[frame_index].center[1] <= region.y2
 
     assert final_result is not None
+
+    # The same complete real video is also the analysis regression. A false
+    # pass that merely produces boxes is not enough: the 50 SCY report must
+    # find the race movement, one wall turn and two complete lengths.
+    report = analyze_race(path, results_table(analysis_frames), RaceInfo("Freestyle", 50, "SCY"),
+                          read_video_metadata(path))
+    assert 500 <= report.start.frame_index <= 800, report.to_dict()
+    assert len([event for event in report.events if event.kind == "turn"]) == 1, report.to_dict()
+    assert len(report.lengths) == 2
+    assert sum(length.distance for length in report.lengths) == 50

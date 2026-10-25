@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from storage.analyses import AnalysisRecord
+from ui.analysis import render_analysis
 from ui.selection import render_selection
 from ui.tracking import render_tracking_controls, render_tracking_results
 
@@ -19,3 +20,5 @@ def render_workspace(record: AnalysisRecord) -> None:
     if record.tracking is not None:
         st.divider()
         render_tracking_results(record)
+        st.divider()
+        render_analysis(record)

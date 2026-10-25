@@ -20,6 +20,7 @@ import pandas as pd
 
 import config
 from core.models import RaceInfo
+from core.race_analysis import RaceAnalysis
 from core.sam2_tracking import Selection, TrackingRun
 from core.video import VideoMetadata
 
@@ -44,6 +45,7 @@ class AnalysisRecord:
     tracking: TrackingRun | None = None
     tracking_csv: str | None = None        # relative path to the per-frame table
     annotated_video: str | None = None     # relative path to the overlay video
+    performance: RaceAnalysis | None = None  # distance-aware race metrics + coaching report
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +59,7 @@ class AnalysisRecord:
             "tracking": self.tracking.to_dict() if self.tracking else None,
             "tracking_csv": self.tracking_csv,
             "annotated_video": self.annotated_video,
+            "performance": self.performance.to_dict() if self.performance else None,
         }
 
     @classmethod
@@ -75,6 +78,7 @@ class AnalysisRecord:
             tracking=tracking,
             tracking_csv=data.get("tracking_csv") if tracking else None,
             annotated_video=data.get("annotated_video") if tracking else None,
+            performance=RaceAnalysis.from_dict(data["performance"]) if data.get("performance") else None,
         )
 
     def absolute_video_path(self) -> Path:

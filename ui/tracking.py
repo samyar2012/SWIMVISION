@@ -84,6 +84,7 @@ def _run_tracking(record: AnalysisRecord, end_frame: int) -> None:
     record.tracking = run
     record.tracking_csv = save_tracking_table(record.analysis_id, results_table(results))
     record.annotated_video = annotated.relative_to(config.PROJECT_ROOT).as_posix()
+    record.performance = None  # measurements belong to the exact tracking run
     save_analysis(record)
     st.rerun()
 

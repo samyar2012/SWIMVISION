@@ -103,11 +103,12 @@ def _render_race_form() -> RaceInfo:
     legs = " → ".join(f"{d} {s}" for s, d in race.im_segments)
     st.caption(f"{race.lengths} length{'s' if race.lengths > 1 else ''} · {race.turns} turn"
                f"{'s' if race.turns != 1 else ''}" + (f" · {legs}" if legs else ""))
-    st.info("What SwimVision measures today, for every stroke: where your swimmer is in each frame "
-            "(tracking). Stroke count, stroke rate, turns and splits are not built yet.")
-    if race.lengths > 2:
-        st.info("Longer races are accepted, but today SwimVision only tracks the swimmer, and SAM 2 often "
-                "loses them at turns. Tracking time on a GPU is roughly 2x the video length.")
+    if race.distance <= 200:
+        st.info("SwimVision follows the selected swimmer through the whole race, then estimates starts, turns, "
+                "length splits and stroke rhythm. Every low-confidence result is marked for review.")
+    else:
+        st.info("Tracking accepts this longer event, but the new race-analysis report currently supports "
+                "25, 50, 100 and 200 yard/metre races.")
     return race
 
 
