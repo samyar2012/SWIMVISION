@@ -16,9 +16,12 @@ and trained models differ.
 4. Each tracked swimmer crop is resized to a fixed temporal input. Frame-to-frame crop motion is smoothed, its
    dominant period is estimated by autocorrelation, and peaks are separated by that period. For freestyle and
    backstroke the UI distinguishes same-arm cycles from individual arm strokes.
-5. Findings compare the swimmer with their own race (for example, first versus final length), not with an
+5. The first verified in-water tracker observation becomes an estimated water-entry event. The first plausible
+   periodic stroke after entry and after each turn becomes a low-confidence breakout estimate. Counts and rates
+   begin at that breakout so dive/turn splash is not counted as swimming rhythm.
+6. Findings compare the swimmer with their own race (for example, first versus final length), not with an
    unexplained universal target. Every event retains a source frame, timestamp, confidence and evidence sentence.
-6. Training sets are examples tied to a measured finding. Nutrition is food-first, general guidance only; the app
+7. Training sets are examples tied to a measured finding. Nutrition is food-first, general guidance only; the app
    does not prescribe calories, weight change, supplements or medical diets.
 
 ## Research mapping

@@ -25,7 +25,8 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 | Automatic takeoff estimate, expected-turn detection and per-length splits for 25/50/100/200 | ✅ First analysis version |
 | Temporal swimmer-crop stroke-cycle estimate with explicit confidence/limitations | ✅ First analysis version |
 | Plain-language findings, evidence, example training sets and general nutrition/recovery guidance | ✅ First analysis version |
-| Audio-buzzer timing, wall-contact finish, calibrated pool coordinates and swim-specific pose | Next validation phases |
+| Ordered water-entry and first-stroke breakout estimates, charts, JSON/TXT/CSV exports | ✅ First analysis version |
+| Audio-buzzer timing, wall-contact finish, calibrated pool coordinates and swim-specific pose | Not production-validated |
 
 ## How Phase 2 works
 
@@ -136,6 +137,8 @@ food-first resources from [USA Swimming](https://www.usaswimming.org/parents/pop
 [USADA](https://www.usada.org/athletes/substances/nutrition-guide/).
 The complete source-to-feature map and validation gates are in
 [docs/ANALYSIS_METHOD.md](docs/ANALYSIS_METHOD.md).
+The exact ready/not-ready submission checklist is in
+[docs/SUBMISSION_STATUS.md](docs/SUBMISSION_STATUS.md).
 
 ## Current limitations
 

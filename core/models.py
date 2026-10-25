@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 # --- Race options shown in the UI -------------------------------------------
-# Swimmer tracking works the same for every stroke; stroke analysis is not built yet for any.
+# Tracking works the same for every stroke. Race analysis supports each listed
+# stroke through 200; IM stroke-cycle classification remains explicitly withheld.
 STROKES: tuple[str, ...] = ("Freestyle", "Backstroke", "Breaststroke", "Butterfly", "Individual Medley")
 
 # Pool code -> (human label, distance unit, length of one pool length in that unit)

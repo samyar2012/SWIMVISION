@@ -227,5 +227,8 @@ def test_video2_full_race_keeps_selected_lane_identity(
                           read_video_metadata(path))
     assert 500 <= report.start.frame_index <= 800, report.to_dict()
     assert len([event for event in report.events if event.kind == "turn"]) == 1, report.to_dict()
+    water_entries = [event for event in report.events if event.kind == "water_entry"]
+    assert len(water_entries) == 1 and 600 <= water_entries[0].frame_index <= 850, report.to_dict()
+    assert [event.frame_index for event in report.events] == sorted(event.frame_index for event in report.events)
     assert len(report.lengths) == 2
     assert sum(length.distance for length in report.lengths) == 50

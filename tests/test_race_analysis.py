@@ -11,11 +11,13 @@ from core.models import RaceInfo
 from core.race_analysis import (
     RaceAnalysis,
     analyze_race,
+    detect_breakouts,
     detect_race_start,
     detect_turns,
 )
 from core.video import VideoMetadata
 from storage.analyses import AnalysisRecord, load_analysis, save_analysis
+from ui.analysis import _plain_report
 
 
 def _synthetic_track(lengths: int, fps: float = 10.0, seconds_per_length: float = 8.0,
@@ -73,6 +75,13 @@ def test_turn_detector_withholds_splits_when_expected_turns_are_missing():
     assert detect_turns(table, race.turns, 10.0, 320, start, len(table) - 1) == []
 
 
+def test_breakout_is_first_plausible_stroke_after_each_underwater_phase():
+    peaks = [2, 8, 15, 25, 32, 45, 52, 61]
+    # Start at 0, turn at 30, finish at 70, 10 fps. Peaks before the minimum
+    # underwater window and too close to the turn are rejected.
+    assert detect_breakouts(peaks, 0, [30], 70, 10.0) == [8, 45]
+
+
 def _write_motion_video(path, table: pd.DataFrame, fps: float = 10.0) -> None:
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (320, 180))
     assert writer.isOpened()
@@ -99,7 +108,12 @@ def test_full_report_round_trip_and_length_metrics(tmp_path):
     assert [length.number for length in report.lengths] == [1, 2]
     assert all(length.distance == 25 and length.unit == "yd" for length in report.lengths)
     assert report.events[0].kind == "start" and report.events[-1].kind == "finish"
+    assert [event.frame_index for event in report.events] == sorted(event.frame_index for event in report.events)
+    assert any(event.kind == "breakout" for event in report.events)
     assert RaceAnalysis.from_dict(report.to_dict()) == report
+    exported = _plain_report(report)
+    assert "KEY FINDINGS" in exported and "EXAMPLE TRAINING SETS" in exported
+    assert "IMPORTANT LIMITATIONS" in exported and race.label in exported
     record = AnalysisRecord("analysis123", "race.avi", "uploads/race.avi", race, meta,
                             performance=report)
     records = tmp_path / "records"

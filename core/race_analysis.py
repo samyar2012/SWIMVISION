@@ -358,6 +358,36 @@ def detect_stroke_cycles(signal: np.ndarray, fps: float, start: int, finish: int
     return peaks
 
 
+def _first_water_position(table: pd.DataFrame) -> int | None:
+    """First frame where the persistent tracker has locked to its in-water state."""
+    if "source" not in table:
+        return None
+    sources = table.source.fillna("").astype(str).str.lower()
+    in_water = sources.str.contains("swimmer") & ~sources.str.contains("visual-person")
+    positions = np.flatnonzero(in_water.to_numpy())
+    return int(positions[0]) if positions.size else None
+
+
+def detect_breakouts(peaks: list[int], start: int, turns: list[int], finish: int,
+                     fps: float) -> list[int]:
+    """Return the first plausible surface stroke after the start and each turn.
+
+    This is intentionally called an *estimated breakout*: without head pose and
+    pool calibration it is the first detected stroke-cycle peak after a minimum
+    underwater window, not a claimed frame-perfect head breakout.
+    """
+    boundaries = [start, *turns]
+    stops = [*turns, finish]
+    minimum_underwater = max(1, int(round(0.45 * fps)))
+    turn_guard = max(1, int(round(0.75 * fps)))
+    breakouts: list[int] = []
+    for begin, stop in zip(boundaries, stops):
+        candidates = [peak for peak in peaks if begin + minimum_underwater <= peak < stop - turn_guard]
+        if candidates:
+            breakouts.append(candidates[0])
+    return breakouts
+
+
 def _stroke_for_length(race: RaceInfo, number: int) -> str:
     if race.stroke != "Individual Medley":
         return race.stroke
@@ -402,6 +432,28 @@ def _coach(race: RaceInfo, lengths: list[LengthMetrics], observed_fraction: floa
             findings.append(Finding("check", "Uneven pacing",
                                     "Length times changed more than 4% across the race.",
                                     "Review the split chart with your coach and choose a steadier opening pace."))
+
+        rates = [item.stroke_rate_spm for item in lengths if item.stroke_rate_spm is not None]
+        if len(rates) >= 2:
+            first_rate, last_rate = rates[0], rates[-1]
+            if last_rate < first_rate * 0.92:
+                findings.append(Finding(
+                    "improve", "Stroke rhythm dropped late",
+                    f"Estimated cycle rate fell from {first_rate:.1f} to {last_rate:.1f} cycles per minute.",
+                    "Hold rhythm with short race-pace repeats and stop before technique deteriorates.",
+                ))
+            elif last_rate > first_rate * 1.08 and splits[-1] > splits[0] * 1.03:
+                findings.append(Finding(
+                    "improve", "More cycles did not create more speed",
+                    "Estimated cycle rate increased while the final length became slower.",
+                    "Prioritize distance per cycle and a firm catch instead of only turning the arms over faster.",
+                ))
+            else:
+                findings.append(Finding(
+                    "good", "Stroke rhythm stayed controlled",
+                    "Estimated cycle rate remained reasonably stable from the first measured length to the last.",
+                    "Keep connecting that rhythm to consistent length times.",
+                ))
     else:
         findings.append(Finding("check", "Turns need verification",
                                 "The video did not show every expected direction change clearly enough for trustworthy splits.",
@@ -429,6 +481,10 @@ def _coach(race: RaceInfo, lengths: list[LengthMetrics], observed_fraction: floa
         sets.append(TrainingSet("Wall speed", "Carry speed through every turn",
                                 f"6–8 repetitions: swim 5 {race.unit} into the wall, turn, streamline and race 5 {race.unit} out.",
                                 "Use one clear cue: tight turn, solid push, then hold the streamline."))
+    if race.stroke == "Individual Medley":
+        sets.append(TrainingSet("IM transitions", "Make each stroke change deliberate",
+                                f"8 × {repeat_distance} {race.unit}, rotating through the IM order; focus on the final stroke into each wall and the first stroke out.",
+                                "Each transition is legal, balanced and preserves speed into the next stroke."))
     if not sets:
         sets.append(TrainingSet("Quality speed", "Maintain the strengths shown in this race",
                                 f"6 × {repeat_distance} {race.unit} smooth-fast with full technique, 30 seconds rest.",
@@ -459,17 +515,37 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
                   for n, pos in enumerate(turn_positions, start=1))
 
     signal = _crop_motion_signal(Path(video_path), track, progress)
-    stroke_name = race.stroke if race.stroke != "Individual Medley" else "Freestyle"
-    peaks = detect_stroke_cycles(signal, sample_fps, start_pos, finish_pos, turn_positions, stroke_name)
+    peaks = (
+        detect_stroke_cycles(signal, sample_fps, start_pos, finish_pos, turn_positions, race.stroke)
+        if race.stroke != "Individual Medley" else []
+    )
+    water_pos = _first_water_position(track)
+    water_entry = (
+        event("water_entry", "Estimated water entry", water_pos, "medium",
+              "persistent tracker's first verified in-water swimmer observation")
+        if water_pos is not None else None
+    )
+    breakout_positions = detect_breakouts(
+        peaks, water_pos if water_pos is not None else start_pos, turn_positions, finish_pos, sample_fps)
+    breakouts = tuple(
+        event("breakout", "Estimated breakout" if n == 1 else f"Estimated breakout after turn {n - 1}",
+              pos, "low", "first periodic stroke-cycle peak after the underwater phase")
+        for n, pos in enumerate(breakout_positions, start=1)
+    )
     boundaries = [start_pos, *turn_positions, finish_pos]
     complete_lengths = len(turn_positions) == race.turns
     lengths: list[LengthMetrics] = []
+    clean_swim_seconds = 0.0
     if complete_lengths:
         for number, (a, b) in enumerate(zip(boundaries, boundaries[1:]), start=1):
             begin, end = track.iloc[a], track.iloc[b]
             split = float(end.timestamp_s - begin.timestamp_s)
-            cycles = sum(a <= p < b for p in peaks) if peaks else None
-            rate = (cycles * 60.0 / split) if cycles and split > 0 else None
+            active_start = breakout_positions[number - 1] if number <= len(breakout_positions) else a
+            cycles = sum(active_start <= p < b for p in peaks) if peaks else None
+            active_duration = float(end.timestamp_s - track.iloc[active_start].timestamp_s)
+            rate = (cycles * 60.0 / active_duration) if cycles and active_duration > 0 else None
+            if cycles and active_duration > 0:
+                clean_swim_seconds += active_duration
             lengths.append(LengthMetrics(
                 number=number, stroke=_stroke_for_length(race, number), distance=race.pool_length,
                 unit=race.unit, start_frame=int(begin.frame_index), end_frame=int(end.frame_index),
@@ -481,22 +557,34 @@ def analyze_race(video_path: str | Path, table: pd.DataFrame, race: RaceInfo,
 
     observed_fraction = float((track.status == "tracked").mean())
     race_time = max(0.0, finish.timestamp_s - start.timestamp_s)
-    total_cycles = len(peaks) or None
-    average_rate = total_cycles * 60 / race_time if total_cycles and race_time else None
+    first_breakout = breakout_positions[0] if breakout_positions else start_pos
+    counted_peaks = [peak for peak in peaks if peak >= first_breakout]
+    total_cycles = len(counted_peaks) or None
+    average_rate = (
+        total_cycles * 60 / clean_swim_seconds
+        if total_cycles and clean_swim_seconds > 0 else None
+    )
     arm_strokes = total_cycles * 2 if total_cycles and race.stroke in {"Freestyle", "Backstroke"} else total_cycles
     findings, sets = _coach(race, lengths, observed_fraction, bool(peaks))
     limitations = [
-        "Start is detected from sustained movement; audio-buzzer timing is not implemented yet.",
+        "Takeoff is inferred from the deck-to-water handoff or sustained movement; audio-buzzer timing is not implemented yet.",
         "Finish currently uses the final tracked frame and must be treated as provisional.",
         "Stroke cycles come from swimmer-crop motion, not a swim-specific pose model; review them before acting.",
+        "Breakout is the first detected stroke-cycle after entry/turn, not calibrated head passage through a pool-distance mark.",
+        "Distance per cycle is pool-length distance divided by detected cycles; it includes underwater distance and is not biomechanical stroke length.",
     ]
     if not complete_lengths:
         limitations.append(f"Detected {len(turn_positions)} of {race.turns} expected turns, so per-length splits are withheld.")
     if race.stroke == "Individual Medley":
         limitations.append("IM stroke transitions are assigned from race order; visual stroke classification is not implemented yet.")
     status = "review_needed" if limitations or not complete_lengths else "complete"
+    ordered_events = tuple(sorted(
+        (start, *((water_entry,) if water_entry else ()), *turns, *breakouts, finish),
+        key=lambda item: item.frame_index,
+    ))
     return RaceAnalysis(
-        race_label=race.label, status=status, start=start, finish=finish, events=(start, *turns, finish),
+        race_label=race.label, status=status, start=start, finish=finish,
+        events=ordered_events,
         lengths=tuple(lengths), race_time_s=round(race_time, 3), stroke_cycles=total_cycles,
         arm_strokes=arm_strokes, average_stroke_rate_spm=round(average_rate, 1) if average_rate else None,
         track_observed_fraction=round(observed_fraction, 4), findings=findings, training_sets=sets,
