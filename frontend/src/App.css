@@ -1,3 +1,1 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Component styles live in index.css so the experience has one visual source of truth. */

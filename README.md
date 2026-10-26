@@ -19,7 +19,7 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 |---|---|
 | Race setup: every individual pool event - free, back, breast, fly, IM - in SCY / SCM / LCM, with lengths, turns and IM legs | ✅ Phase 1 (metadata only) |
 | Video upload (MP4 / MOV / AVI / M4V / MKV), real FPS / frames / duration / resolution | ✅ Phase 1 |
-| Choose the swimmer visually with one rectangle—no frame numbers or coordinates | ✅ Phase 2 |
+| Choose the swimmer with one tap—no frame numbers, coordinates or box drawing | ✅ Phase 2 |
 | Hybrid YOLO + swimmer U-Net detection with persistent identity and gap prediction | ✅ Phase 2 (validating) |
 | Annotated tracking video + per-frame CSV | ✅ Phase 2 |
 | Automatic takeoff estimate, expected-turn detection and per-length splits for 25/50/100/200 | ✅ First analysis version |
@@ -66,7 +66,7 @@ flowchart LR
 
 ## Technology stack
 
-Python 3.12, Streamlit, streamlit-cropper, OpenCV, Ultralytics YOLO, PyTorch, NumPy, Pandas, FFmpeg (bundled via `imageio-ffmpeg`), pytest.
+React 19, Vite, Python 3.12, FastAPI, OpenCV, Ultralytics YOLO, PyTorch, NumPy, Pandas, FFmpeg (bundled via `imageio-ffmpeg`), pytest. The older Streamlit prototype remains available for development comparisons.
 
 **Python version:** use **3.12**. Python 3.14 is not recommended because PyTorch/Ultralytics wheels lag behind.
 
@@ -108,13 +108,23 @@ The small YOLO person-detector weights are downloaded by Ultralytics the first t
 
 ## Running locally
 
+Start the API in one terminal:
+
 ```powershell
-.\.venv\Scripts\python.exe -m streamlit run app.py
+.\.venv\Scripts\python.exe -m uvicorn api:app --reload --port 8000
 ```
 
-Open <http://localhost:8501>. Developer mode (PowerShell): `$env:SWIMVISION_DEBUG="1"` before the command.
+Start the React interface in a second terminal:
 
-In the app: upload the video, move the time slider, draw one box around the swimmer, click **Use this swimmer**, then click **Track my swimmer**. There are no frame numbers, pixel coordinates or lane boundaries to enter.
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open <http://localhost:5173>. Upload the race, enter the event and optional official time, tap the swimmer once in the opening frame, and leave the rest to SwimVision. A production frontend build can be created with `npm run build`; the FastAPI process serves that build automatically.
+
+The earlier Streamlit prototype is still available with `.\.venv\Scripts\python.exe -m streamlit run app.py`.
 
 Tests: `.\.venv\Scripts\python.exe -m pytest`
 

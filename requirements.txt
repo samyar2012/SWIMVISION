@@ -3,6 +3,9 @@
 
 streamlit>=1.40
 streamlit-cropper>=0.3     # rectangle tool for selecting the swimmer
+fastapi>=0.115             # React app API
+uvicorn[standard]>=0.32    # local/hosted API server
+python-multipart>=0.0.12   # streamed video uploads for FastAPI
 Pillow>=10.0
 opencv-python>=4.10        # NOT the "-headless" build: Ultralytics requires "opencv-python"
                            # and having both installed makes them overwrite each other.
