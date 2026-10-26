@@ -2,10 +2,13 @@ import argparse
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.swimmer_detector import SwimmerDetector
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+from core.swimmer_detector import SwimmerDetector  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

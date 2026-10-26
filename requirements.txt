@@ -12,6 +12,7 @@ opencv-python>=4.10        # NOT the "-headless" build: Ultralytics requires "op
 numpy>=1.26
 pandas>=2.2
 python-dotenv>=1.0
+requests>=2.31             # AI coach: local Ollama or OpenAI chat API
 imageio-ffmpeg>=0.5        # bundles an FFmpeg binary (no manual FFmpeg install)
 
 # Phase 2: SAM 2 video segmentation (pretrained, no training)

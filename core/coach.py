@@ -1,202 +1,231 @@
-"""User-facing coaching presentation built from a measured race report.
+"""AI swim coach that answers questions about one analysed race.
 
-The race-analysis module owns measurements.  This module only translates those
-measurements into plain language, which keeps the same output usable by the
-current Streamlit prototype and a future React client.
+Questions go to a real language model: a local Ollama model first, then
+OpenAI when an API key is configured. The model is given the measured facts of
+the race and the conversation so far, and is told to separate what the video
+measured from general coaching knowledge. When no model is reachable the
+caller gets :class:`CoachUnavailable` instead of a canned answer.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import json
-from typing import Any, Callable
+import logging
+from typing import Any
 
-from core.race_analysis import RaceAnalysis, TechniqueMetric, TrainingSet
+import requests
 
-COACH_FORMAT_VERSION = 1
+import config
+from core.errors import SwimVisionError
+from core.race_analysis import RaceAnalysis
+from core.race_report import format_time, strokes_word
 
+logger = logging.getLogger("swimvision.coach")
 
-@dataclass(frozen=True)
-class CoachPoint:
-    title: str
-    explanation: str
-    action: str
-    confidence: str
+MAX_HISTORY_MESSAGES = 12
+_OLLAMA_TIMEOUT_S = 180
+_OPENAI_TIMEOUT_S = 90
+_GEMINI_TIMEOUT_S = 90
+_UNIT_WORD = {"yd": "yards", "m": "meters"}
 
+SYSTEM_PROMPT = """You are SwimVision Coach, an experienced competitive swim coach talking with a \
+swimmer (or their parent) about ONE race they filmed.
 
-@dataclass(frozen=True)
-class CoachBrief:
-    """Small, JSON-ready response intended for a non-technical interface."""
+Answer the question they just asked. Do not paste a stock paragraph. Do not recycle the same reply \
+if they ask something new.
 
-    race_label: str
-    time_label: str
-    race_time_s: float
-    race_time_display: str
-    video_estimate_s: float
-    video_estimate_display: str
-    headline: str
-    overview: str
-    strengths: tuple[CoachPoint, ...]
-    priorities: tuple[CoachPoint, ...]
-    next_practice: TrainingSet | None
-    suggested_questions: tuple[str, ...]
-    format_version: int = COACH_FORMAT_VERSION
+You have the measured facts of this race below. Rules:
+- Ground every statement about THIS race in those facts. Never invent numbers, splits, times, or \
+observations that are not listed. Breathing, kick count, underwater distance, head position and \
+body angles were NOT measured.
+- If they ask about something the video did not measure, say so plainly, then give useful general \
+advice for that stroke.
+- You may use general swimming knowledge (technique cues, drills, sets, race strategy, mindset).
+- Write sets the way a coach writes them on the whiteboard, e.g. "8 x 25 freestyle at race pace, \
+30 seconds rest", and make sure the distances add up.
+- Talk like a real coach: plain words, short paragraphs, no jargon, no numbered five-step plans, \
+no words like "cycles" or "priority". Simple bullet lists and **bold** are fine.
+- Keep answers under about 180 words unless they ask for more detail.
+- Do not give medical advice.
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-def format_seconds(value: float) -> str:
-    minutes = int(value // 60)
-    seconds = value - minutes * 60
-    return f"{minutes}:{seconds:05.2f}" if minutes else f"{seconds:.2f} s"
+RACE FACTS
+{facts}"""
 
 
-def _point(metric: TechniqueMetric) -> CoachPoint:
-    return CoachPoint(
-        title=metric.label,
-        explanation=metric.explanation,
-        action=metric.action,
-        confidence=metric.confidence,
-    )
+class CoachUnavailable(SwimVisionError):
+    """No language model could be reached."""
 
 
-def build_coach_brief(report: RaceAnalysis) -> CoachBrief:
-    """Create the small response a family-facing UI should show first."""
-    measured = [m for m in report.technique.metrics if m.rating != "not_measurable"]
-    strengths = tuple(_point(m) for m in measured if m.rating == "good")[:2]
-    improvement = [m for m in measured if m.rating == "improve"]
-    review = [m for m in measured if m.rating == "check"]
-    priorities = tuple(_point(m) for m in [*improvement, *review][:2])
-
-    if priorities:
-        headline = f"Start with {priorities[0].title.lower()}."
-        overview = (
-            f"Your clearest next step is {priorities[0].title.lower()}. "
-            f"{priorities[0].action}"
-        )
-    elif strengths:
-        headline = f"{strengths[0].title} was your clearest strength."
-        overview = (
-            "The visible parts of this swim were controlled. "
-            f"Keep building on {strengths[0].title.lower()}."
-        )
+def race_facts(report: RaceAnalysis) -> str:
+    """Plain-text facts about the race, used as the model's only source of race data."""
+    unit_word = _UNIT_WORD.get(report.unit, report.unit)
+    lines = [f"Event: {report.distance} {report.unit} {report.stroke.lower()} ({report.pool_length} "
+             f"{report.unit} pool, {report.expected_lengths} lengths)."]
+    if report.race_time_s is not None:
+        source = {"official": "official time entered by the swimmer",
+                  "video": "timed from the video"}.get(report.race_time_source, "")
+        lines.append(f"Race time: {format_time(report.race_time_s)} ({source}).")
+        lines.append(f"Average speed: {report.distance / report.race_time_s:.2f} {unit_word} per second; pace "
+                     f"{format_time(report.race_time_s * 100 / report.distance)} per 100 {unit_word}.")
+        if report.race_time_source == "official" and report.video_race_time_s is not None:
+            lines.append(f"The video itself measured {format_time(report.video_race_time_s)}.")
     else:
-        headline = "This video is a starting point, not a technique grade."
-        overview = (
-            "The camera did not show enough repeatable movement for a confident technique call. "
-            "Use the filming advice below and try again."
-        )
-
-    time_label = "Official race time" if report.race_time_source == "official_manual" else "Estimated race time"
-    return CoachBrief(
-        race_label=report.race_label,
-        time_label=time_label,
-        race_time_s=report.race_time_s,
-        race_time_display=format_seconds(report.race_time_s),
-        video_estimate_s=report.estimated_race_time_s,
-        video_estimate_display=format_seconds(report.estimated_race_time_s),
-        headline=headline,
-        overview=overview,
-        strengths=strengths,
-        priorities=priorities,
-        next_practice=report.training_sets[0] if report.training_sets else None,
-        suggested_questions=(
-            "What should I fix first?",
-            "Give me a practice set.",
-            "What did I do well?",
-            "How confident is this analysis?",
-        ),
-    )
-
-
-def build_coach_context(report: RaceAnalysis) -> str:
-    """Return grounded JSON context for an optional local language model.
-
-    A future backend may pass this text to a small local model.  The instruction
-    explicitly prevents the model from inventing measurements that are not in
-    the report.
-    """
-    payload = {
-        "instructions": (
-            "Answer as a supportive swim coach in plain language. Use only the supplied report. "
-            "Never invent joint angles, breathing, kick, splits, or measurements. Say when the "
-            "video cannot answer. Keep the answer under 140 words."
-        ),
-        "coach_brief": build_coach_brief(report).to_dict(),
-        "measured_technique": [
-            asdict(metric)
-            for metric in report.technique.metrics
-            if metric.rating != "not_measurable"
-        ],
-        "training_sets": [asdict(item) for item in report.training_sets],
-        "nutrition_tips": list(report.nutrition_tips),
-        "limitations": list(report.limitations),
-    }
-    return json.dumps(payload, ensure_ascii=False)
+        lines.append("Race time: not available (the finish was not visible and no official time was entered).")
+    if report.reaction_s is not None:
+        lines.append(f"Reaction time: {report.reaction_s:.2f} s from the start beep to first movement.")
+    else:
+        lines.append("Reaction time: not measured (no start beep audible).")
+    if report.lengths:
+        lines.append("Splits by length:")
+        for length in report.lengths:
+            rate = (f", stroke rate about {length.stroke_rate_spm:.0f} {strokes_word(report.stroke)}/min"
+                    if length.stroke_rate_spm else "")
+            lines.append(f"  Length {length.number}: {format_time(length.split_s)} (total "
+                         f"{format_time(length.cumulative_s)}), {length.average_speed:.2f} {unit_word}/s, pace "
+                         f"{format_time(length.pace_per_100_s)} per 100{rate}.")
+        lines.append("Length 1 includes the dive start, so it is normally the fastest.")
+    else:
+        lines.append("Splits by length: not available (not every wall was visible).")
+    if report.average_stroke_rate_spm:
+        lines.append(f"Average stroke rate: about {report.average_stroke_rate_spm:.0f} "
+                     f"{strokes_word(report.stroke)} per minute.")
+    if report.technique:
+        lines.append("What the analysis found:")
+        lines.extend(f"  {note.topic}: {note.observation} {note.meaning}" for note in report.technique)
+    if report.focus_areas:
+        lines.append("What to work on (most important first):")
+        lines.extend(f"  {area.title}: {area.why}" for area in report.focus_areas)
+    if report.notes:
+        lines.append("Notes: " + " ".join(report.notes))
+    lines.append("Not measured by this video: breathing, kick, underwater phases, head and body position.")
+    return "\n".join(lines)
 
 
-def answer_coach_question(
-    report: RaceAnalysis,
-    question: str,
-    model: Callable[[str], str] | None = None,
-) -> str:
-    """Answer common questions locally, or use an injected lightweight model.
+def _clean_history(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    messages = []
+    for item in (history or [])[-MAX_HISTORY_MESSAGES:]:
+        role, content = item.get("role"), (item.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content[:2000]})
+    return messages
 
-    The deterministic fallback keeps the feature deployable without model
-    downloads.  Passing a callable later lets a backend use Ollama, llama.cpp,
-    or another hosted/local provider without changing the React response shape.
-    """
+
+def ask_coach(report: RaceAnalysis, question: str, history: list[dict[str, str]] | None = None) -> str:
+    """Answer ``question`` about the race with a language model."""
     question = question.strip()
     if not question:
-        return "Ask me what to fix, what went well, or what to practice next."
-    if model is not None:
-        prompt = f"{build_coach_context(report)}\n\nSwimmer question: {question}"
-        return model(prompt).strip()
+        raise SwimVisionError("Type a question for the coach.")
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT.format(facts=race_facts(report))},
+        *_clean_history(history),
+        {"role": "user", "content": question},
+    ]
+    errors: list[str] = []
+    # Cloud models first: a local 7B chat model answers too fast and too vaguely
+    # to sound like a coach. Ollama remains the offline fallback.
+    if config.OPENAI_API_KEY:
+        try:
+            return _ask_openai(messages)
+        except CoachUnavailable as exc:
+            errors.append(str(exc))
+    if config.GEMINI_API_KEY:
+        try:
+            return _ask_gemini(messages)
+        except CoachUnavailable as exc:
+            errors.append(str(exc))
+    try:
+        return _ask_ollama(messages)
+    except CoachUnavailable as exc:
+        errors.append(str(exc))
+    logger.warning("AI coach unavailable: %s", "; ".join(errors))
+    raise CoachUnavailable(
+        "The AI coach is offline. Add an OPENAI_API_KEY or GEMINI_API_KEY to .env, "
+        f"or start Ollama (ollama serve) with the {config.OLLAMA_MODEL} model, then ask again."
+    )
 
-    brief = build_coach_brief(report)
-    lowered = question.casefold()
-    if any(word in lowered for word in ("time", "fast", "result")):
-        answer = f"Your {brief.time_label.lower()} is {brief.race_time_display}."
-        if report.race_time_source == "official_manual":
-            answer += f" The separate video estimate is {brief.video_estimate_display}."
-        return answer
 
-    if any(word in lowered for word in ("fix", "improve", "wrong", "technique", "first")):
-        if not brief.priorities:
-            return brief.overview
-        point = brief.priorities[0]
-        return f"Work on {point.title.lower()} first. {point.explanation} Try this: {point.action}"
+def _ollama_model() -> str:
+    """The configured model if installed, otherwise the first installed chat model."""
+    response = requests.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
+    response.raise_for_status()
+    installed = [item["name"] for item in response.json().get("models", [])]
+    if not installed:
+        raise CoachUnavailable("Ollama is running but has no models installed.")
+    if config.OLLAMA_MODEL in installed:
+        return config.OLLAMA_MODEL
+    chat = [name for name in installed if "embed" not in name]
+    return (chat or installed)[0]
 
-    if any(word in lowered for word in ("practice", "set", "drill", "train")):
-        item = brief.next_practice
-        if item is None:
-            return "This report did not produce a trustworthy practice recommendation yet."
-        return f"Try {item.name}: {item.set_text} Success looks like: {item.success_check}"
 
-    if any(word in lowered for word in ("good", "strength", "well", "best")):
-        if not brief.strengths:
-            return (
-                "This video did not show a clear measurable strength yet. That does not mean your "
-                "technique was bad; it means the camera evidence was limited."
-            )
-        point = brief.strengths[0]
-        return f"Your clearest strength was {point.title.lower()}. {point.explanation}"
-
-    if any(word in lowered for word in ("confident", "confidence", "evidence", "know", "accurate")):
-        if brief.priorities:
-            point = brief.priorities[0]
-            return (
-                f"The {point.title.lower()} recommendation has {point.confidence} confidence. "
-                "It comes from movement visible in this video, not a full joint-by-joint pose model."
-            )
-        return (
-            "The report only states what the video supports. Details such as catch angle, breathing "
-            "angle, and kick mechanics are withheld when they cannot be measured reliably."
+def _ask_ollama(messages: list[dict[str, str]]) -> str:
+    try:
+        model = _ollama_model()
+        response = requests.post(
+            f"{config.OLLAMA_URL}/api/chat",
+            json={"model": model, "messages": messages, "stream": False,
+                  "options": {"temperature": 0.5, "num_ctx": 4096}},
+            timeout=_OLLAMA_TIMEOUT_S,
         )
+        response.raise_for_status()
+        answer = _content(response.json().get("message"))
+    except (requests.RequestException, ValueError) as exc:
+        raise CoachUnavailable(f"Ollama: {exc}") from exc
+    if not answer:
+        raise CoachUnavailable("Ollama returned an empty answer.")
+    return answer
 
-    if any(word in lowered for word in ("food", "eat", "diet", "fuel", "recover")):
-        tips = " ".join(report.nutrition_tips[:2])
-        return f"{tips} This is general sports guidance, not a personal medical or diet prescription."
 
-    return f"{brief.overview} You can ask what to fix first, what went well, or for a practice set."
+def _ask_openai(messages: list[dict[str, str]]) -> str:
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
+            json={"model": config.OPENAI_COACH_MODEL, "messages": messages,
+                  "temperature": 0.6, "max_tokens": 700},
+            timeout=_OPENAI_TIMEOUT_S,
+        )
+        response.raise_for_status()
+        choices = response.json().get("choices") or [{}]
+        answer = _content(choices[0].get("message"))
+    except (requests.RequestException, ValueError) as exc:
+        raise CoachUnavailable(f"OpenAI: {exc}") from exc
+    if not answer:
+        raise CoachUnavailable("OpenAI returned an empty answer.")
+    return answer
+
+
+def _ask_gemini(messages: list[dict[str, str]]) -> str:
+    system = next((item["content"] for item in messages if item["role"] == "system"), "")
+    contents = []
+    for item in messages:
+        if item["role"] == "system":
+            continue
+        role = "model" if item["role"] == "assistant" else "user"
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"][0]["text"] += "\n\n" + item["content"]
+        else:
+            contents.append({"role": role, "parts": [{"text": item["content"]}]})
+    if not contents or contents[0]["role"] != "user":
+        contents.insert(0, {"role": "user", "parts": [{"text": "Please answer about this race."}]})
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_COACH_MODEL}:generateContent",
+            headers={"x-goog-api-key": config.GEMINI_API_KEY, "Content-Type": "application/json"},
+            json={
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "generationConfig": {"temperature": 0.6, "maxOutputTokens": 700},
+            },
+            timeout=_GEMINI_TIMEOUT_S,
+        )
+        response.raise_for_status()
+        parts = (((response.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+        answer = "\n".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        raise CoachUnavailable(f"Gemini: {exc}") from exc
+    if not answer:
+        raise CoachUnavailable("Gemini returned an empty answer.")
+    return answer
+
+
+def _content(message: Any) -> str:
+    return (message or {}).get("content", "").strip() if isinstance(message, dict) else ""

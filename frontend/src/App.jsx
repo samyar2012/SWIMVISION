@@ -1,26 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   askCoach,
   createAnalysis,
+  fetchLiveFrame,
   getAnalysis,
   getAnalysisStatus,
   getFrameUrl,
+  getVideoUrl,
   selectSwimmer,
   startAnalysis,
 } from './api'
 import './App.css'
 
-const STROKES = ['Freestyle', 'Backstroke', 'Breaststroke', 'Butterfly', 'Individual Medley']
-const DISTANCES = {
-  SCY: { default: [25, 50, 100, 200], 'Individual Medley': [100, 200] },
-  SCM: { default: [25, 50, 100, 200], 'Individual Medley': [100, 200] },
-  LCM: { default: [50, 100, 200], 'Individual Medley': [200] },
-}
+const STROKES = ['Freestyle', 'Backstroke', 'Breaststroke', 'Butterfly']
+const DISTANCES = { SCY: [25, 50, 100, 200], SCM: [25, 50, 100, 200], LCM: [50, 100, 200] }
 const POOLS = [
   { value: 'SCY', label: '25-yard pool' },
   { value: 'SCM', label: '25-meter pool' },
   { value: 'LCM', label: '50-meter pool' },
 ]
+const STAGES = ['Preparing your race', 'Following your swim', 'Timing your race', 'Writing your report']
 
 const UploadIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
@@ -55,7 +54,7 @@ function UploadScreen({ onCreated }) {
   const [officialTime, setOfficialTime] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const allowedDistances = DISTANCES[pool][stroke] || DISTANCES[pool].default
+  const allowedDistances = DISTANCES[pool]
   const selectedDistance = allowedDistances.includes(distance) ? distance : allowedDistances[0]
 
   const chooseFile = (candidate) => {
@@ -90,10 +89,10 @@ function UploadScreen({ onCreated }) {
         <section className="hero-copy">
           <div className="eyebrow"><span /> Your race, explained</div>
           <h1>See more than<br /><em>the finish time.</em></h1>
-          <p>Upload a race video. SwimVision follows your swim and turns it into clear, stroke-specific coaching you can use at your next practice.</p>
+          <p>Upload a race video. SwimVision follows you through the whole race, times every length, and tells you in plain words what went well and what to work on.</p>
           <div className="promise-row">
             <div><strong>One tap</strong><span>to choose yourself</span></div>
-            <div><strong>Whole race</strong><span>analyzed start to finish</span></div>
+            <div><strong>Real splits</strong><span>start, turns and finish</span></div>
             <div><strong>Plain English</strong><span>without technical clutter</span></div>
           </div>
         </section>
@@ -124,7 +123,7 @@ function UploadScreen({ onCreated }) {
             <label>Pool<select value={pool} onChange={(event) => setPool(event.target.value)}>{POOLS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
             <label className="time-field">Official time <span>optional</span><input value={officialTime} onChange={(event) => setOfficialTime(event.target.value)} placeholder="54.32 or 1:54.32" /></label>
           </div>
-          <p className="time-note">Your official time improves the report. It never changes the video or tracking.</p>
+          <p className="time-note">If you know your official time, add it. It makes the total and the last split exact.</p>
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary-button" type="button" disabled={!file || busy} onClick={submit}>
             {busy ? 'Preparing your video…' : 'Continue'} <span aria-hidden="true">→</span>
@@ -137,25 +136,38 @@ function UploadScreen({ onCreated }) {
 
 function SelectScreen({ analysis, onConfirmed, onBack }) {
   const [point, setPoint] = useState(null)
-  const [busy, setBusy] = useState(false)
+  const [box, setBox] = useState(null)
+  const [finding, setFinding] = useState(false)
+  const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
 
-  const pick = (event) => {
+  const pick = async (event) => {
     const rect = event.currentTarget.getBoundingClientRect()
-    setPoint({ x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height })
+    const next = { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height }
+    if (next.x < 0 || next.x > 1 || next.y < 0 || next.y > 1) return
+    setPoint(next)
+    setBox(null)
     setError('')
+    setFinding(true)
+    try {
+      const selected = await selectSwimmer(analysis.analysis_id, next)
+      setBox(selected.box)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setFinding(false)
+    }
   }
 
   const confirm = async () => {
-    if (!point) return
-    setBusy(true)
+    if (!box) return
+    setStarting(true)
     try {
-      await selectSwimmer(analysis.analysis_id, point)
       await startAnalysis(analysis.analysis_id, analysis.official_time_s)
       onConfirmed()
     } catch (err) {
       setError(err.message)
-      setBusy(false)
+      setStarting(false)
     }
   }
 
@@ -165,17 +177,54 @@ function SelectScreen({ analysis, onConfirmed, onBack }) {
       <main className="focus-layout">
         <div className="step-pill">One quick step</div>
         <h1>Which swimmer are you?</h1>
-        <p>Tap directly on yourself in the opening frame. That’s the only selection you’ll make.</p>
-        <div className="selection-frame" onClick={pick} role="button" tabIndex={0}>
-          <img src={getFrameUrl(analysis.analysis_id)} alt="Opening frame of the uploaded race" />
-          {point && <span className="selection-point" style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}><i /></span>}
+        <p>{box ? 'Is the highlighted swimmer you? If not, tap yourself again.' : 'Tap directly on yourself in the opening frame.'}</p>
+        <div className="selection-frame">
+          <div className="selection-image" onClick={pick} role="button" tabIndex={0}>
+            <img src={getFrameUrl(analysis.analysis_id)} alt="Opening frame of the uploaded race" draggable={false} />
+            {box && (
+              <span
+                className="selection-box"
+                style={{ left: `${box.x1 * 100}%`, top: `${box.y1 * 100}%`, width: `${(box.x2 - box.x1) * 100}%`, height: `${(box.y2 - box.y1) * 100}%` }}
+              />
+            )}
+            {point && !box && <span className={`selection-point ${finding ? 'finding' : ''}`} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}><i /></span>}
+          </div>
         </div>
         <div className="selection-actions">
           <button className="text-button" type="button" onClick={onBack}>← Back</button>
-          <button className="primary-button compact-button" type="button" disabled={!point || busy} onClick={confirm}>{busy ? 'Starting…' : 'That’s me'} <span>→</span></button>
+          <button className="primary-button compact-button" type="button" disabled={!box || finding || starting} onClick={confirm}>
+            {starting ? 'Starting…' : finding ? 'Finding you…' : 'That’s me'} <span>→</span>
+          </button>
         </div>
         {error && <p className="form-error" role="alert">{error}</p>}
       </main>
+    </div>
+  )
+}
+
+function LiveView({ analysisId, active }) {
+  const [frame, setFrame] = useState(null)
+  useEffect(() => {
+    if (!active) return undefined
+    let alive = true
+    let timer
+    const load = async () => {
+      try {
+        const url = await fetchLiveFrame(analysisId)
+        if (!alive) { if (url) URL.revokeObjectURL(url); return }
+        if (url) setFrame(url)
+      } catch { /* the next poll retries */ }
+      if (alive) timer = window.setTimeout(load, 180)
+    }
+    load()
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [analysisId, active])
+  useEffect(() => () => { if (frame) URL.revokeObjectURL(frame) }, [frame])
+
+  return (
+    <div className={`live-view ${frame ? 'has-frame' : ''}`}>
+      {frame ? <img src={frame} alt="Your race being tracked, with you highlighted" /> : <div className="live-placeholder"><WaveMark /><span>Loading your video…</span></div>}
+      {frame && active && <span className="live-badge"><i />Live</span>}
     </div>
   )
 }
@@ -184,6 +233,7 @@ function ProcessingScreen({ analysisId, onComplete, onFail, onNew }) {
   const [status, setStatus] = useState({ stage: 'Preparing your race', progress: 0.03 })
   useEffect(() => {
     let active = true
+    let timer
     const check = async () => {
       try {
         const next = await getAnalysisStatus(analysisId)
@@ -191,93 +241,294 @@ function ProcessingScreen({ analysisId, onComplete, onFail, onNew }) {
         setStatus(next)
         if (next.state === 'complete') return onComplete()
         if (next.state === 'failed') return onFail(next.message || 'Analysis could not be completed.')
-        window.setTimeout(check, 1200)
+        timer = window.setTimeout(check, 1000)
       } catch (err) {
         if (active) onFail(err.message)
       }
     }
     check()
-    return () => { active = false }
+    return () => { active = false; window.clearTimeout(timer) }
   }, [analysisId, onComplete, onFail])
 
-  const steps = ['Preparing your race', 'Following your swim', 'Reading your race', 'Building your coaching plan']
-  const activeIndex = Math.max(0, steps.indexOf(status.stage))
+  const activeIndex = Math.max(0, STAGES.indexOf(status.stage))
+  const tracking = activeIndex <= 1
   return (
     <div className="page-shell processing-page">
       <Header onNew={onNew} compact />
-      <main className="processing-card">
-        <div className="water-orbit"><WaveMark /><span /><span /></div>
-        <p className="eyebrow centered">SwimVision is working</p>
-        <h1>{status.stage}</h1>
-        <p>This can take a few minutes for a full race. You can leave this tab open.</p>
-        <div className="progress-track"><span style={{ width: `${Math.max(4, Math.round((status.progress || 0) * 100))}%` }} /></div>
-        <div className="friendly-steps">
-          {steps.map((step, index) => <div key={step} className={index < activeIndex ? 'done' : index === activeIndex ? 'active' : ''}><span>{index < activeIndex ? '✓' : index + 1}</span>{step}</div>)}
-        </div>
+      <main className="processing-live">
+        <LiveView analysisId={analysisId} active={tracking} />
+        <section className="processing-side">
+          <p className="eyebrow"><span /> SwimVision is working</p>
+          <h1>{status.stage}</h1>
+          <p>{tracking ? 'Watch SwimVision follow you through the race. You stay highlighted the whole way.' : 'Tracking is done. Now your start, turns and finish are being timed.'}</p>
+          <div className="progress-track"><span style={{ width: `${Math.max(4, Math.round((status.progress || 0) * 100))}%` }} /></div>
+          <div className="friendly-steps vertical">
+            {STAGES.map((step, index) => <div key={step} className={index < activeIndex ? 'done' : index === activeIndex ? 'active' : ''}><span>{index < activeIndex ? '✓' : index + 1}</span>{step}</div>)}
+          </div>
+        </section>
       </main>
     </div>
   )
 }
 
-function PointCard({ point, kind }) {
+function RaceVideo({ report, videoRef }) {
+  const seek = (seconds) => {
+    const video = videoRef.current
+    if (!video) return
+    video.currentTime = Math.max(0, seconds - 0.5)
+    video.play().catch(() => {})
+  }
+  if (!report.has_video) return null
   return (
-    <article className={`point-card ${kind}`}>
-      <span className="point-icon">{kind === 'strength' ? '✓' : '↗'}</span>
-      <div><h3>{point.title}</h3><p>{point.explanation}</p>{point.action && <div className="action-line"><strong>Try this</strong>{point.action}</div>}</div>
-    </article>
+    <section className="race-video">
+      <div className="video-kicker">Your race, with you highlighted</div>
+      <video ref={videoRef} src={getVideoUrl(report.analysis_id)} controls playsInline preload="metadata" />
+      {report.moments?.length > 0 && (
+        <div className="moment-row" aria-label="Jump to a moment in the race">
+          {report.moments.map((moment) => (
+            <button type="button" key={`${moment.label}-${moment.video_s}`} onClick={() => seek(moment.video_s)}>
+              <strong>{moment.label}</strong><span>{moment.race_clock}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
-function OverviewTab({ report }) {
-  return <div className="results-grid">
-    <section className="result-section wide"><div className="section-heading"><span>01</span><div><p>Your clearest takeaway</p><h2>{report.headline}</h2></div></div><p className="lead-copy">{report.overview}</p></section>
-    <section className="result-section"><div className="section-kicker">What looked good</div>{report.strengths?.length ? report.strengths.map((point) => <PointCard key={point.title} point={point} kind="strength" />) : <p className="empty-note">This angle did not show a clear repeatable strength. That does not mean your technique was poor.</p>}</section>
-    <section className="result-section"><div className="section-kicker">Work on this first</div>{report.priorities?.length ? report.priorities.map((point) => <PointCard key={point.title} point={point} kind="priority" />) : <p className="empty-note">No clear technique problem was measurable in this video.</p>}</section>
-    {report.next_practice && <section className="practice-banner wide"><div><span>Next practice</span><h2>{report.next_practice.name}</h2><p>{report.next_practice.purpose}</p></div><div className="practice-set"><strong>{report.next_practice.set_text}</strong><span>Success looks like: {report.next_practice.success_check}</span></div></section>}
-  </div>
+function OverviewTab({ report, onTab }) {
+  return (
+    <div className="tab-stack">
+      <section className="result-section"><p className="lead-copy flush">{report.overview}</p></section>
+      {report.highlights?.length > 0 && (
+        <div className="stat-grid">
+          {report.highlights.map((item) => <div className="stat-card" key={item.label}><span>{item.label}</span><strong>{item.value}</strong><small>{item.detail}</small></div>)}
+        </div>
+      )}
+      {report.focus?.length > 0 && (
+        <section className="result-section">
+          <div className="section-kicker">The biggest thing to work on</div>
+          <h2 className="section-title">{report.focus[0].title}</h2>
+          <p className="body-copy">{report.focus[0].why}</p>
+          <button className="text-link" type="button" onClick={() => onTab('What to work on')}>See what to work on →</button>
+        </section>
+      )}
+      <Notes notes={report.notes} />
+    </div>
+  )
+}
+
+function Notes({ notes }) {
+  if (!notes?.length) return null
+  return <div className="camera-note"><span>Good to know</span>{notes.map((note) => <p key={note}>{note}</p>)}</div>
 }
 
 function TechniqueTab({ report }) {
-  const technique = report.technique || {}
-  return <div className="tab-stack">
-    <section className="technique-intro"><div><span className="stroke-label">{technique.stroke || report.race_label}</span><h2>{technique.title || 'Technique breakdown'}</h2><p>{technique.summary || report.overview}</p></div><div className="view-score"><strong>{technique.visible_cycles ?? '—'}</strong><span>clear cycles reviewed</span></div></section>
-    <div className="technique-list">{(technique.sections || []).map((section, index) => <article key={section.title}><span>{String(index + 1).padStart(2, '0')}</span><div><h3>{section.title}</h3><p>{section.explanation}</p><strong>{section.action}</strong></div><em className={section.rating}>{section.rating_label}</em></article>)}</div>
-    {technique.camera_note && <div className="camera-note"><span>Camera note</span><p>{technique.camera_note}</p></div>}
-  </div>
+  if (!report.technique?.length) {
+    return <div className="empty-panel"><h2>Not enough of the race was visible</h2><p>SwimVision needs to see the start or both walls clearly to describe how the race went.</p></div>
+  }
+  return (
+    <div className="tab-stack">
+      <div className="technique-notes">
+        {report.technique.map((note) => (
+          <article key={note.topic} className={`technique-note ${note.tone}`}>
+            <h3>{note.topic}</h3>
+            <p className="observation">{note.observation}</p>
+            <p>{note.meaning}</p>
+          </article>
+        ))}
+      </div>
+      <div className="camera-note"><span>What this is based on</span><p>Start, turns, finish and how fast your arms were turning over come from this video. Breathing, kick and underwater work are not guessed.</p></div>
+    </div>
+  )
 }
 
-function RaceTab({ report }) {
-  return <div className="tab-stack"><section className="race-table"><div className="race-row header"><span>Length</span><span>Split</span><span>Pace</span><span>Cycles</span></div>{(report.lengths || []).map((length) => <div className="race-row" key={length.number}><strong>Length {length.number}</strong><span>{length.split_display}</span><span>{length.pace_note || '—'}</span><span>{length.stroke_cycles ?? '—'}</span></div>)}</section>{!report.lengths?.length && <div className="empty-panel"><h2>No trustworthy splits yet</h2><p>The race did not show every wall clearly enough, so SwimVision did not invent missing split times.</p></div>}</div>
+function formatDelta(delta) {
+  if (delta == null) return '—'
+  const sign = delta > 0 ? '+' : ''
+  return `${sign}${delta.toFixed(2)}`
 }
 
-function PlanTab({ report }) {
-  return <div className="tab-stack"><div className="plan-grid">{(report.training_sets || []).map((item, index) => <article key={item.name}><span>{String(index + 1).padStart(2, '0')}</span><h2>{item.name}</h2><p>{item.purpose}</p><div>{item.set_text}</div><small>Goal: {item.success_check}</small></article>)}</div>{report.nutrition_tips?.length > 0 && <section className="fuel-card"><div><span>Fuel & recovery</span><h2>Simple habits around practice</h2></div><ul>{report.nutrition_tips.map((tip) => <li key={tip}>{tip}</li>)}</ul><small>General sports guidance only. A parent, coach, doctor, or sports dietitian should personalize food and hydration needs.</small></section>}</div>
+function RaceTab({ report, videoRef }) {
+  const splits = report.splits || []
+  const slowest = Math.max(...splits.map((item) => item.split_s), 1)
+  const seek = (seconds) => {
+    const video = videoRef.current
+    if (!video) return
+    video.currentTime = Math.max(0, seconds - 0.5)
+    video.play().catch(() => {})
+    video.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+  if (!splits.length) {
+    return <div className="tab-stack"><div className="empty-panel"><h2>No splits for this video</h2><p>Not every wall was visible, so SwimVision did not make up split times.</p></div><Notes notes={report.notes} /></div>
+  }
+  return (
+    <div className="tab-stack">
+      <section className="race-table">
+        <div className="race-row header"><span>Length</span><span>Split</span><span>Vs last</span><span>Total</span><span>Pace / 100</span><span>Stroke rate</span></div>
+        {splits.map((length) => (
+          <button type="button" className={`race-row ${length.number === report.fastest_length ? 'fastest' : ''}`} key={length.number} onClick={() => seek(length.video_start_s)} title="Watch this length">
+            <strong>{length.label}<small>{length.distance_label}</small></strong>
+            <span className="split-cell"><b>{length.split}</b><i style={{ width: `${(length.split_s / slowest) * 100}%` }} /></span>
+            <span className={length.delta_s > 0.15 ? 'slower' : length.delta_s < -0.15 ? 'faster' : ''}>{formatDelta(length.delta_s)}</span>
+            <span>{length.cumulative}</span>
+            <span>{length.pace_per_100}</span>
+            <span>{length.stroke_rate ?? '—'}</span>
+          </button>
+        ))}
+      </section>
+      <p className="table-note">These are the wall-to-wall splits from the video. Pace / 100 is how long 100 {report.unit === 'yd' ? 'yards' : 'meters'} would take at that length’s speed. Stroke rate is {report.stroke_rate_unit}. The first length includes your dive. Tap a length to watch it.</p>
+      <Notes notes={report.notes} />
+    </div>
+  )
 }
 
-function CoachTab({ report, analysisId }) {
-  const [messages, setMessages] = useState([{ role: 'coach', content: report.overview }])
+function WorkOnTab({ report }) {
+  if (!report.focus?.length) {
+    return <div className="empty-panel"><h2>Nothing stood out to fix</h2><p>This race did not show a clear weak point. Keep racing this event and compare the next one.</p></div>
+  }
+  return (
+    <div className="tab-stack">
+      <p className="lead-copy flush">Not a practice plan. These are the things from this race you need to work on. Look up sets for each one.</p>
+      {report.focus.map((area, index) => (
+        <article className="focus-card" key={area.title}>
+          <span className="focus-number">{index + 1}</span>
+          <div>
+            <h2>{area.title}</h2>
+            <p className="body-copy">{area.why}</p>
+            <p className="focus-how">{area.how}</p>
+            {area.look_up?.length > 0 && (
+              <div className="look-up">
+                <span>You can look up sets for:</span>
+                <div>{area.look_up.map((topic) => <a key={topic} href={`https://www.google.com/search?q=${encodeURIComponent(`${topic} swimming workout`)}`} target="_blank" rel="noreferrer">{topic}</a>)}</div>
+              </div>
+            )}
+          </div>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function formatInline(text) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) => (
+    part.startsWith('**') && part.endsWith('**') ? <strong key={index}>{part.slice(2, -2)}</strong> : part
+  ))
+}
+
+function RichText({ text }) {
+  const blocks = []
+  let list = null
+  text.split('\n').forEach((raw) => {
+    const line = raw.trim()
+    const item = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/)
+    if (item) {
+      if (!list) { list = []; blocks.push(list) }
+      list.push(item[1])
+      return
+    }
+    list = null
+    if (line) blocks.push(line.replace(/^#+\s*/, ''))
+  })
+  return blocks.map((block, index) => (
+    Array.isArray(block)
+      ? <ul key={index}>{block.map((entry, itemIndex) => <li key={itemIndex}>{formatInline(entry)}</li>)}</ul>
+      : <p key={index}>{formatInline(block)}</p>
+  ))
+}
+
+function CoachTab({ report }) {
+  const [messages, setMessages] = useState([])
   const [question, setQuestion] = useState('')
   const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const endRef = useRef(null)
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [messages, busy])
+
   const send = async (text) => {
     const cleaned = text.trim()
     if (!cleaned || busy) return
+    const history = messages.map(({ role, content }) => ({ role, content }))
     setMessages((current) => [...current, { role: 'user', content: cleaned }])
     setQuestion('')
+    setNotice('')
     setBusy(true)
     try {
-      const response = await askCoach(analysisId, cleaned)
-      setMessages((current) => [...current, { role: 'coach', content: response.answer }])
+      const response = await askCoach(report.analysis_id, cleaned, history)
+      setMessages((current) => [...current, { role: 'assistant', content: response.answer }])
     } catch (err) {
-      setMessages((current) => [...current, { role: 'coach', content: err.message }])
+      setMessages((current) => current.slice(0, -1))
+      setQuestion(cleaned)
+      setNotice(err.message)
     } finally { setBusy(false) }
   }
-  return <div className="coach-layout"><aside><span>Ask about this race</span><h2>Your SwimVision coach</h2><p>Answers use only measurements from this swim. If the video cannot answer, your coach will say so.</p><div className="prompt-list">{report.suggested_questions?.map((prompt) => <button key={prompt} type="button" onClick={() => send(prompt)}>{prompt}<span>→</span></button>)}</div></aside><section className="chat-panel"><div className="messages">{messages.map((message, index) => <div key={`${message.role}-${index}`} className={`message ${message.role}`}>{message.role === 'coach' && <WaveMark />}<p>{message.content}</p></div>)}{busy && <div className="message coach typing"><WaveMark /><p><i /><i /><i /></p></div>}</div><form onSubmit={(event) => { event.preventDefault(); send(question) }}><input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask about your technique, pacing, or next practice…" /><button type="submit" disabled={busy || !question.trim()}>Send</button></form></section></div>
+
+  return (
+    <div className="coach-layout">
+      <aside>
+        <span>Ask about this race</span>
+        <h2>Your SwimVision coach</h2>
+        <p>A real coach model that can see this race’s splits, start and stroke rate. The first answer can take a little while. If it is offline, add an OpenAI or Gemini key to <code>.env</code>.</p>
+        <div className="prompt-list">{report.suggested_questions?.map((prompt) => <button key={prompt} type="button" disabled={busy} onClick={() => send(prompt)}>{prompt}<span>→</span></button>)}</div>
+      </aside>
+      <section className="chat-panel">
+        <div className="messages">
+          {messages.length === 0 && <div className="chat-empty"><WaveMark /><p>Ask your first question below.</p></div>}
+          {messages.map((message, index) => (
+            <div key={`${message.role}-${index}`} className={`message ${message.role === 'assistant' ? 'coach' : 'user'}`}>
+              {message.role === 'assistant' && <WaveMark />}
+              <div className="bubble">{message.role === 'assistant' ? <RichText text={message.content} /> : <p>{message.content}</p>}</div>
+            </div>
+          ))}
+          {busy && <div className="message coach typing"><WaveMark /><div className="bubble"><p><i /><i /><i /></p></div></div>}
+          <div ref={endRef} />
+        </div>
+        {notice && <p className="form-error" role="alert">{notice}</p>}
+        <form onSubmit={(event) => { event.preventDefault(); send(question) }}>
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask about this race…" maxLength={500} />
+          <button type="submit" disabled={busy || !question.trim()}>Send</button>
+        </form>
+      </section>
+    </div>
+  )
 }
 
-function ResultsScreen({ report, analysisId, onNew }) {
-  const tabs = ['Overview', 'Technique', 'Race', 'Practice plan', 'Ask coach']
+const TABS = ['Overview', 'Technique', 'Race', 'What to work on', 'Ask coach']
+
+
+function ResultsScreen({ report, onNew }) {
   const [tab, setTab] = useState('Overview')
-  return <div className="page-shell results-page"><Header onNew={onNew} compact /><main className="results-shell"><section className="result-hero"><div><div className="eyebrow"><span /> Analysis complete</div><p>{report.race_label}</p><h1>{report.headline}</h1></div><div className="time-card"><span>{report.time_label}</span><strong>{report.race_time_display}</strong>{report.time_label.startsWith('Official') && <small>Video estimate {report.video_estimate_display}</small>}</div></section><nav className="result-tabs" aria-label="Analysis sections">{tabs.map((item) => <button type="button" className={tab === item ? 'active' : ''} onClick={() => setTab(item)} key={item}>{item}</button>)}</nav><div className="tab-content">{tab === 'Overview' && <OverviewTab report={report} />}{tab === 'Technique' && <TechniqueTab report={report} />}{tab === 'Race' && <RaceTab report={report} />}{tab === 'Practice plan' && <PlanTab report={report} />}{tab === 'Ask coach' && <CoachTab report={report} analysisId={analysisId} />}</div></main></div>
+  const videoRef = useRef(null)
+  const timeLabel = { official: 'Official time', video: 'Race time' }[report.race_time_source] || 'Race time'
+  return (
+    <div className="page-shell results-page">
+      <Header onNew={onNew} compact />
+      <main className="results-shell">
+        <section className="result-hero">
+          <div>
+            <div className="eyebrow"><span /> Analysis complete</div>
+            <h1>{report.race_label}</h1>
+          </div>
+          <div className="time-card">
+            <span>{timeLabel}</span>
+            <strong>{report.race_time ?? '—'}</strong>
+            {report.race_time_source === 'video' && <small>Timed from the video</small>}
+          </div>
+        </section>
+        <RaceVideo report={report} videoRef={videoRef} />
+        <nav className="result-tabs" aria-label="Analysis sections">
+          {TABS.map((item) => <button type="button" className={tab === item ? 'active' : ''} onClick={() => setTab(item)} key={item}>{item}</button>)}
+        </nav>
+        <div className="tab-content">
+          {tab === 'Overview' && <OverviewTab report={report} onTab={setTab} />}
+          {tab === 'Technique' && <TechniqueTab report={report} />}
+          {tab === 'Race' && <RaceTab report={report} videoRef={videoRef} />}
+          {tab === 'What to work on' && <WorkOnTab report={report} />}
+          {tab === 'Ask coach' && <CoachTab report={report} />}
+        </div>
+      </main>
+    </div>
+  )
 }
 
 function App() {
@@ -287,14 +538,15 @@ function App() {
   const [fatalError, setFatalError] = useState('')
 
   const reset = () => { setScreen('upload'); setAnalysis(null); setReport(null); setFatalError('') }
-  const complete = useMemo(() => async () => {
+  const complete = useCallback(async () => {
     try { setReport(await getAnalysis(analysis.analysis_id)); setScreen('results') }
     catch (err) { setFatalError(err.message); setScreen('error') }
   }, [analysis])
+  const fail = useCallback((message) => { setFatalError(message); setScreen('error') }, [])
 
   if (screen === 'select') return <SelectScreen analysis={analysis} onBack={reset} onConfirmed={() => setScreen('processing')} />
-  if (screen === 'processing') return <ProcessingScreen analysisId={analysis.analysis_id} onComplete={complete} onFail={(message) => { setFatalError(message); setScreen('error') }} onNew={reset} />
-  if (screen === 'results') return <ResultsScreen report={report} analysisId={analysis.analysis_id} onNew={reset} />
+  if (screen === 'processing') return <ProcessingScreen analysisId={analysis.analysis_id} onComplete={complete} onFail={fail} onNew={reset} />
+  if (screen === 'results') return <ResultsScreen report={report} onNew={reset} />
   if (screen === 'error') return <div className="page-shell"><Header onNew={reset} compact /><main className="error-page"><span>We couldn’t finish this analysis</span><h1>Let’s try that again.</h1><p>{fatalError}</p><button className="primary-button compact-button" type="button" onClick={reset}>Start over</button></main></div>
   return <UploadScreen onCreated={(created) => { setAnalysis(created); setScreen('select') }} />
 }

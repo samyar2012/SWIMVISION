@@ -23,8 +23,7 @@ def test_all_strokes_accepted():
 @pytest.mark.parametrize("args", [
     ("Dolphin", 50, "SCY"), ("Freestyle", 75, "SCY"), ("Freestyle", 50, "XYZ"),
     ("Freestyle", 25, "LCM"),            # a 50 m pool has no 25 events
-    ("Individual Medley", 100, "LCM"),   # 100 IM is short course only
-    ("Individual Medley", 50, "SCY"),
+    ("Individual Medley", 200, "SCY"),   # only the four strokes are supported
     ("Freestyle", 1650, "SCM"),          # 1650 is a yards event
     ("Freestyle", 1500, "SCY"),
     ("Butterfly", 400, "SCY"),
@@ -49,18 +48,23 @@ def test_every_listed_event_is_valid():
 @pytest.mark.parametrize("stroke, distance, pool, lengths, turns", [
     ("Freestyle", 50, "SCY", 2, 1), ("Freestyle", 1650, "SCY", 66, 65),
     ("Freestyle", 1500, "LCM", 30, 29), ("Freestyle", 50, "LCM", 1, 0),
-    ("Individual Medley", 200, "SCM", 8, 7),
+    ("Butterfly", 200, "SCM", 8, 7),
 ])
 def test_lengths_and_turns(stroke, distance, pool, lengths, turns):
     race = RaceInfo(stroke, distance, pool)
     assert (race.lengths, race.turns) == (lengths, turns)
 
 
-def test_im_segments_follow_medley_order():
-    assert RaceInfo("Individual Medley", 400, "LCM").im_segments == (
-        ("Butterfly", 100), ("Backstroke", 100), ("Breaststroke", 100), ("Freestyle", 100))
-    assert RaceInfo("Freestyle", 200, "SCY").im_segments == ()
-    assert RaceInfo("Individual Medley", 100, "SCY").label == "100 yd Individual Medley (SCY)"
+def test_only_the_four_strokes_are_offered():
+    from core.models import STROKES
+    assert STROKES == ("Freestyle", "Backstroke", "Breaststroke", "Butterfly")
+
+
+@pytest.mark.parametrize("stroke, flip", [
+    ("Freestyle", True), ("Backstroke", True), ("Breaststroke", False), ("Butterfly", False),
+])
+def test_turn_style_follows_the_stroke(stroke, flip):
+    assert RaceInfo(stroke, 100, "SCY").flip_turns is flip
 
 
 def _record() -> AnalysisRecord:

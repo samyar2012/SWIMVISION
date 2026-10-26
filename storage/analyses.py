@@ -46,6 +46,7 @@ class AnalysisRecord:
     tracking_csv: str | None = None        # relative path to the per-frame table
     annotated_video: str | None = None     # relative path to the overlay video
     performance: RaceAnalysis | None = None  # distance-aware race metrics + coaching report
+    official_time_s: float | None = None     # the swimmer's official time, when they entered one
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +61,7 @@ class AnalysisRecord:
             "tracking_csv": self.tracking_csv,
             "annotated_video": self.annotated_video,
             "performance": self.performance.to_dict() if self.performance else None,
+            "official_time_s": self.official_time_s,
         }
 
     @classmethod
@@ -79,6 +81,7 @@ class AnalysisRecord:
             tracking_csv=data.get("tracking_csv") if tracking else None,
             annotated_video=data.get("annotated_video") if tracking else None,
             performance=RaceAnalysis.from_dict(data["performance"]) if data.get("performance") else None,
+            official_time_s=data.get("official_time_s"),
         )
 
     def absolute_video_path(self) -> Path:

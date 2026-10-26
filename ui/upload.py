@@ -100,12 +100,11 @@ def _render_race_form() -> RaceInfo:
     distance = col_dist.selectbox("Distance", options, index=options.index(50) if 50 in options else 0,
                                   format_func=lambda d: f"{d} {unit}")
     race = RaceInfo(stroke=stroke, distance=int(distance), pool=pool)
-    legs = " → ".join(f"{d} {s}" for s, d in race.im_segments)
     st.caption(f"{race.lengths} length{'s' if race.lengths > 1 else ''} · {race.turns} turn"
-               f"{'s' if race.turns != 1 else ''}" + (f" · {legs}" if legs else ""))
+               f"{'s' if race.turns != 1 else ''}")
     if race.distance <= 200:
-        st.info("SwimVision follows the selected swimmer through the whole race, then estimates starts, turns, "
-                "length splits and stroke rhythm. Every low-confidence result is marked for review.")
+        st.info("SwimVision follows the selected swimmer through the whole race, then times the start, turns "
+                "and finish, splits the race into lengths and measures stroke rate.")
     else:
         st.info("Tracking accepts this longer event, but the new race-analysis report currently supports "
                 "25, 50, 100 and 200 yard/metre races.")

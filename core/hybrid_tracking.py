@@ -34,10 +34,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 ProgressFn = Callable[[int, int], None]
+PreviewFn = Callable[[np.ndarray], None]
 
-_TRACKED = (70, 220, 70)
-_PREDICTED = (0, 210, 255)
-_LOST = (68, 68, 239)
+_HIGHLIGHT = (40, 225, 255)  # BGR: warm yellow stands out against pool water
 
 
 def load_hybrid_detector() -> HybridSwimmerDetector:
@@ -60,29 +59,84 @@ def load_hybrid_detector() -> HybridSwimmerDetector:
         raise ModelLoadError(f"Could not load the tracking models: {type(exc).__name__}: {exc}") from exc
 
 
-def _draw_result(
-    frame: np.ndarray,
-    result: TrackedSwimmer | None,
-    timestamp_s: float,
-) -> np.ndarray:
-    """Draw a simple observed/predicted/lost overlay without exposing internals."""
-    out = frame.copy()
-    scale = max(0.6, frame.shape[0] / 720.0)
-    thickness = max(2, int(round(3 * scale)))
-    if result is None:
-        label, colour = "SEARCHING FOR SWIMMER", _LOST
-    else:
-        label = "ESTIMATED THROUGH OCCLUSION" if result.predicted else "TRACKED"
-        colour = _PREDICTED if result.predicted else _TRACKED
-        x1, y1, x2, y2 = result.box.to_int_list()
-        cv2.rectangle(out, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
+class SwimmerHighlight:
+    """Draw a steady highlight around the followed swimmer, with no text.
 
-    cv2.rectangle(out, (10, 10), (420, int(82 * scale)), (18, 18, 18), -1)
-    cv2.putText(out, label, (22, int(42 * scale)), cv2.FONT_HERSHEY_SIMPLEX,
-                0.72 * scale, colour, max(1, int(round(2 * scale))), cv2.LINE_AA)
-    cv2.putText(out, f"{timestamp_s:.2f} s", (22, int(70 * scale)), cv2.FONT_HERSHEY_SIMPLEX,
-                0.55 * scale, (245, 245, 245), max(1, int(round(scale))), cv2.LINE_AA)
-    return out
+    The box is smoothed over a few frames so the highlight glides with the
+    swimmer instead of jittering, and nothing is drawn while the swimmer is
+    not being followed.
+    """
+
+    def __init__(self, fps: float) -> None:
+        self._box: np.ndarray | None = None
+        self._missing = 0
+        self._reset_after = max(1, int(round(0.5 * fps)))
+
+    def draw(self, frame: np.ndarray, result: TrackedSwimmer | None) -> np.ndarray:
+        out = frame.copy()
+        if result is None:
+            self._missing += 1
+            if self._missing >= self._reset_after:
+                self._box = None
+            return out
+        self._missing = 0
+        target = np.array(result.box.to_list(), dtype=float)
+        if self._box is None or _jumped(self._box, target):
+            self._box = target
+        else:
+            self._box = 0.55 * target + 0.45 * self._box
+        _draw_highlight(out, self._box, faded=result.predicted)
+        return out
+
+
+def _jumped(previous: np.ndarray, target: np.ndarray) -> bool:
+    size = max(previous[2] - previous[0], previous[3] - previous[1], 1.0)
+    centre_shift = np.hypot((target[0] + target[2] - previous[0] - previous[2]) / 2,
+                            (target[1] + target[3] - previous[1] - previous[3]) / 2)
+    return centre_shift > 1.5 * size
+
+
+def _draw_highlight(out: np.ndarray, box: np.ndarray, faded: bool) -> None:
+    height, width = out.shape[:2]
+    scale = max(0.6, height / 720.0)
+    pad = 6 * scale
+    x1, y1 = int(max(0, box[0] - pad)), int(max(0, box[1] - pad))
+    x2, y2 = int(min(width - 1, box[2] + pad)), int(min(height - 1, box[3] + pad))
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return
+    radius = int(min(14 * scale, (x2 - x1) / 4, (y2 - y1) / 4))
+    thickness = max(3, int(round(4 * scale)))
+    strength = 0.55 if faded else 1.0
+
+    tint = out.copy()
+    cv2.rectangle(tint, (x1, y1), (x2, y2), _HIGHLIGHT, -1)
+    region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
+    out[region] = cv2.addWeighted(tint[region], 0.22 * strength, out[region], 1 - 0.22 * strength, 0)
+
+    margin = int(16 * scale)
+    gx1, gy1 = max(0, x1 - margin), max(0, y1 - margin)
+    gx2, gy2 = min(width, x2 + margin + 1), min(height, y2 + margin + 1)
+    glow = np.zeros((gy2 - gy1, gx2 - gx1, 3), dtype=out.dtype)
+    _rounded_rectangle(glow, x1 - gx1, y1 - gy1, x2 - gx1, y2 - gy1, radius, _HIGHLIGHT, thickness * 3)
+    glow = cv2.GaussianBlur(glow, (0, 0), 4 * scale)
+    area = out[gy1:gy2, gx1:gx2]
+    cv2.addWeighted(area, 1.0, glow, 0.75 * strength, 0, dst=area)
+    line = tuple(int(c * strength + 255 * (1 - strength) * 0.4) for c in _HIGHLIGHT)
+    _rounded_rectangle(out, x1, y1, x2, y2, radius, line, thickness)
+
+
+def _rounded_rectangle(image: np.ndarray, x1: int, y1: int, x2: int, y2: int, radius: int,
+                       colour: tuple[int, ...], thickness: int) -> None:
+    if radius < 2:
+        cv2.rectangle(image, (x1, y1), (x2, y2), colour, thickness, cv2.LINE_AA)
+        return
+    cv2.line(image, (x1 + radius, y1), (x2 - radius, y1), colour, thickness, cv2.LINE_AA)
+    cv2.line(image, (x1 + radius, y2), (x2 - radius, y2), colour, thickness, cv2.LINE_AA)
+    cv2.line(image, (x1, y1 + radius), (x1, y2 - radius), colour, thickness, cv2.LINE_AA)
+    cv2.line(image, (x2, y1 + radius), (x2, y2 - radius), colour, thickness, cv2.LINE_AA)
+    for centre, start in (((x1 + radius, y1 + radius), 180), ((x2 - radius, y1 + radius), 270),
+                          ((x2 - radius, y2 - radius), 0), ((x1 + radius, y2 - radius), 90)):
+        cv2.ellipse(image, centre, (radius, radius), start, 0, 90, colour, thickness, cv2.LINE_AA)
 
 
 def _validate_request(meta: VideoMetadata, selection: Selection, end_frame: int) -> None:
@@ -106,8 +160,13 @@ def track_swimmer(
     analysis_width: int | None = None,
     progress: ProgressFn | None = None,
     detector: HybridDetectorLike | None = None,
+    preview: PreviewFn | None = None,
 ) -> tuple[list[FrameResult], TrackingRun]:
-    """Track automatically from one visual selection to ``end_frame``."""
+    """Track automatically from one visual selection to ``end_frame``.
+
+    ``preview`` receives every highlighted frame as it is written, so a client
+    can watch the swimmer being followed while tracking runs.
+    """
     _validate_request(meta, selection, end_frame)
     video_path, annotated_path = Path(video_path), Path(annotated_path)
     aw, ah = fit_size(meta.width, meta.height, analysis_width)
@@ -127,6 +186,7 @@ def track_swimmer(
     writer = open_h264_writer(annotated_path, aw, ah, meta.fps / stride)
     results: list[FrameResult] = []
     wanted = set(indices)
+    highlight = SwimmerHighlight(meta.fps / stride)
     started = time.perf_counter()
     try:
         for frame_index in range(selection.frame_index, end_frame + 1):
@@ -154,7 +214,10 @@ def track_swimmer(
                 ) from exc
 
             timestamp = frame_to_timestamp(frame_index, meta.fps)
-            writer.send(np.ascontiguousarray(_draw_result(frame, tracked, timestamp)))
+            annotated = np.ascontiguousarray(highlight.draw(frame, tracked))
+            writer.send(annotated)
+            if preview:
+                preview(annotated)
             if tracked is None:
                 result = FrameResult(frame_index, timestamp, None, 0, "")
             else:

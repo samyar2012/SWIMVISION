@@ -849,6 +849,12 @@ class PersistentVisualSwimmerTracker:
         self._box: BBox | None = None
         self._observed_box: BBox | None = None
         self._visual_box: BBox | None = None
+        # Only the selection and detector observations may change this size
+        # anchor. Comparing ViTTrack only with its own previous output lets a
+        # box inflate a little every frame until it covers the whole video.
+        self._reference_box: BBox | None = None
+        # The box ViTTrack was last started from; its output keeps that scale.
+        self._visual_seed: BBox | None = None
         self._visual: Any | None = None
         self._state = "person"
         self._person_missed = 0
@@ -889,6 +895,7 @@ class PersistentVisualSwimmerTracker:
         self._box = selected
         self._observed_box = selected
         self._visual_box = selected
+        self._reference_box = selected
         if isinstance(frame, np.ndarray):
             self._reset_visual(frame, selected)
         return TrackedSwimmer(selected, 1.0, "selection", 1.0, False, 0)
@@ -947,6 +954,9 @@ class PersistentVisualSwimmerTracker:
         if valid_visual:
             assert visual_box is not None
             self._visual_box = visual_box
+            confirming = [box for _, box in persons if box.iou(visual_box) >= 0.5]
+            if confirming:
+                self._reference_box = max(confirming, key=visual_box.iou)
 
         person_gate = max(55.0, math.hypot(self._visual_box.width, self._visual_box.height) * 0.38)
         near_person = any(
@@ -980,6 +990,7 @@ class PersistentVisualSwimmerTracker:
                     key=lambda item: math.dist(item[1].center, self._visual_box.center),
                 )
                 self._state = "water"
+                self._reference_box = box
                 self._reset_visual(frame, box)
                 return self._accept(box, self._confidence(detection), "swimmer", detection)
 
@@ -1018,11 +1029,23 @@ class PersistentVisualSwimmerTracker:
             math.hypot(self._box.width, self._box.height) * 0.70 + self._missed_frames * 2.0,
         )
         gate = min(gate, math.hypot(width, height) * 0.20)
-        valid_visual = self._visual_is_sane(visual_box, visual_score, self._box, width, height, gate=gate)
+        visual_gate = gate
+        if self._missed_frames > 0:
+            # ViTTrack can lock onto a static look-alike (a lane sign or splash)
+            # after a gap. Without a detector confirmation the visual box may
+            # only move as far as the swimmer plausibly could have.
+            speed = math.hypot(*self._velocity)
+            diagonal = math.hypot(self._box.width, self._box.height)
+            visual_gate = min(gate, max(30.0, diagonal * 0.8 + speed * self._missed_frames * 1.5))
+        valid_visual = (
+            self._visual_is_sane(visual_box, visual_score, self._box, width, height, gate=visual_gate)
+            and visual_box is not None
+            and self._consistent_size(visual_box)
+        )
         eligible = [
             (detection, box)
             for detection, box in swimmers
-            if math.dist(box.center, self._box.center) <= gate
+            if math.dist(box.center, self._box.center) <= gate and self._consistent_size(box)
         ]
         if eligible:
             def rank(item: tuple[DetectionLike, BBox]) -> float:
@@ -1065,6 +1088,8 @@ class PersistentVisualSwimmerTracker:
             )
         self._box = box
         self._observed_box = box
+        if detection is not None:
+            self._update_reference(box)
         self._missed_frames = 0
         self._last_source = source
         return TrackedSwimmer(box, confidence, source, confidence, False, 0, detection)
@@ -1108,11 +1133,59 @@ class PersistentVisualSwimmerTracker:
         if box is None:
             return None, score
         box = box.clamp(width, height)
-        return (box, score) if box.width > 0 and box.height > 0 else (None, score)
+        if box.width <= 0 or box.height <= 0:
+            return None, score
+        if self._inflated(box, width, height):
+            if self._box is not None:
+                self._reset_visual(frame, self._box)
+            return None, 0.0
+        return box, score
+
+    def _update_reference(self, box: BBox) -> None:
+        reference = self._reference_box
+        if reference is None:
+            self._reference_box = box
+            return
+        alpha = 0.4
+        ref_w = reference.width + alpha * (box.width - reference.width)
+        ref_h = reference.height + alpha * (box.height - reference.height)
+        cx, cy = box.center
+        self._reference_box = BBox(cx - ref_w / 2, cy - ref_h / 2, cx + ref_w / 2, cy + ref_h / 2)
+
+    def _consistent_size(self, box: BBox) -> bool:
+        """Reject merged adjacent-lane blobs and fragments as identity anchors."""
+        reference = self._reference_box
+        if reference is None or reference.area <= 0:
+            return True
+        # Butterfly splash legitimately changes the heatmap box a lot, so only
+        # a blob that suddenly spans another lane is refused.
+        relax = 1.0 if self._missed_frames <= 15 else 1.5
+        return (
+            box.width <= reference.width * 2.2 * relax
+            and box.height <= reference.height * 2.6 * relax
+            and reference.area * 0.12 / relax <= box.area <= reference.area * 3.5 * relax
+        )
+
+    def _inflated(self, box: BBox, width: int, height: int) -> bool:
+        # Area only: a dive legitimately turns a tall standing box into a long,
+        # flat one, while a merged neighbour in the water is refused by
+        # ``_consistent_size``. Growth is measured from the box ViTTrack was
+        # started from, because YOLO's person box is much tighter than
+        # ViTTrack's; the looser detector bound stops growth compounding
+        # over repeated restarts.
+        seed = self._visual_seed or self._box
+        if seed is None:
+            return False
+        growth_limit = 2.6 if self._state == "person" else 3.5
+        if box.area > seed.area * growth_limit or box.area > width * height * 0.30:
+            return True
+        reference = self._reference_box
+        return reference is not None and box.area > reference.area * growth_limit * 2.5
 
     def _reset_visual(self, frame: np.ndarray, box: BBox) -> None:
         self._visual = self._visual_factory(frame, box)
         self._visual_box = box
+        self._visual_seed = box
 
     def _visual_is_sane(
         self,

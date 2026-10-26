@@ -69,6 +69,43 @@ def test_visual_tracker_rejects_an_impossible_adjacent_lane_jump() -> None:
     assert result.center[1] > 300
 
 
+def test_visual_tracker_rejects_a_merged_blob_much_larger_than_the_swimmer() -> None:
+    selected = BBox(100, 250, 180, 390)
+    tracker = PersistentVisualSwimmerTracker(
+        "unused.onnx",
+        visual_factory=lambda _frame, _box: FakeVisualTracker(None, 0.0),
+        max_estimated_frames=10,
+    )
+    tracker.start_from_box(selected, FRAME_SHAPE, frame=BLANK_FRAME)
+    entry = Detection(110, 330, 210, 430, 0.8, "swimmer")
+    for _ in range(5):
+        tracker.update([entry], FRAME_SHAPE, frame=BLANK_FRAME)
+    assert tracker.water_locked
+
+    # Two neighbouring swimmers merged into one heat-map blob over the target.
+    merged = Detection(40, 300, 360, 470, 0.95, "swimmer")
+    result = tracker.update([merged], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.box.width < 150
+
+
+def test_visual_box_stretched_across_the_next_lane_is_not_reported() -> None:
+    selected = BBox(100, 180, 170, 330)
+    # Same centre and height, but stretched to 2.6x the width: it still looks
+    # plausible by area and position, yet it now covers a neighbour too.
+    visual = FakeVisualTracker(BBox(44, 180, 226, 330))
+    tracker = PersistentVisualSwimmerTracker(
+        "unused.onnx", visual_factory=lambda _frame, _box: visual, max_estimated_frames=10,
+    )
+    tracker.start_from_box(selected, FRAME_SHAPE, frame=BLANK_FRAME)
+
+    result = tracker.update([], FRAME_SHAPE, frame=BLANK_FRAME)
+
+    assert result is not None and result.predicted
+    assert result.box == selected
+
+
 def test_selection_locks_the_matching_botsort_id() -> None:
     tracker = PersistentSwimmerTracker()
     target = Detection(100, 200, 160, 250, 0.55, "person")

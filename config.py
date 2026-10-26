@@ -64,9 +64,14 @@ SUPPORTED_VIDEO_EXTENSIONS: tuple[str, ...] = ("mp4", "mov", "avi", "m4v", "mkv"
 # Longest preview side we re-encode to when the original is not browser-friendly.
 PREVIEW_MAX_HEIGHT: int = 720
 
-# --- Optional AI coach (later phase). The rest of the app works without these.
+# --- AI coach. A local Ollama model answers race questions; an OpenAI key is an
+# optional fallback. The rest of the app works without either.
+OLLAMA_URL: str = os.getenv("SWIMVISION_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_MODEL: str = os.getenv("SWIMVISION_OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY") or None
+OPENAI_COACH_MODEL: str = os.getenv("SWIMVISION_OPENAI_MODEL", "gpt-4o-mini")
 GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or None
+GEMINI_COACH_MODEL: str = os.getenv("SWIMVISION_GEMINI_MODEL", "gemini-3.5-flash")
 
 
 def ensure_directories() -> None:

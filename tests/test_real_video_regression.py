@@ -152,10 +152,12 @@ def test_video2_full_race_keeps_selected_lane_identity(
         870: BBox(350, 0, 550, 140),
         890: BBox(350, 20, 500, 140),
         924: BBox(360, 140, 520, 270),
-        995: BBox(580, 120, 760, 260),
-        1066: BBox(730, 200, 848, 330),
-        1137: BBox(760, 230, 848, 330),
-        1208: BBox(650, 220, 848, 360),
+        # Approaching the turn wall the selected swimmer passes close to the
+        # camera; the swimmer in the right-hand lane must not take over here.
+        995: BBox(290, 140, 470, 310),
+        1066: BBox(370, 230, 560, 420),
+        1137: BBox(480, 300, 690, 464),
+        1208: BBox(420, 220, 630, 410),
         1279: BBox(400, 190, 600, 330),
         1350: BBox(350, 130, 490, 250),
         1421: BBox(380, 130, 530, 250),
@@ -220,20 +222,21 @@ def test_video2_full_race_keeps_selected_lane_identity(
 
     assert final_result is not None
 
-    # The same complete real video is also the analysis regression. A false
-    # pass that merely produces boxes is not enough: the 50 SCY report must
-    # find the race movement, one wall turn and two complete lengths.
+    # The same complete real video is also the analysis regression, checked
+    # against times read by hand from the footage: start beep 22.57 s, feet
+    # on the wall at the turn about 36.95 s, finish touch about 53.55 s.
     report = analyze_race(path, results_table(analysis_frames), RaceInfo("Freestyle", 50, "SCY"),
                           read_video_metadata(path))
-    assert 500 <= report.start.frame_index <= 800, report.to_dict()
-    assert len([event for event in report.events if event.kind == "turn"]) == 1, report.to_dict()
-    water_entries = [event for event in report.events if event.kind == "water_entry"]
-    assert len(water_entries) == 1 and 600 <= water_entries[0].frame_index <= 850, report.to_dict()
+    assert report.start_method == "beep", report.to_dict()
+    assert abs(report.start.timestamp_s - 22.57) <= 0.15, report.to_dict()
+    assert report.reaction_s is not None and 0.2 <= report.reaction_s <= 0.6
+    turns = [event for event in report.events if event.kind == "turn"]
+    assert len(turns) == 1 and abs(turns[0].timestamp_s - 36.95) <= 0.4, report.to_dict()
+    assert report.finish.confidence == "high" and abs(report.finish.timestamp_s - 53.55) <= 0.3
     assert [event.frame_index for event in report.events] == sorted(event.frame_index for event in report.events)
-    assert len(report.lengths) == 2
-    assert sum(length.distance for length in report.lengths) == 50
-    assert report.finish.confidence in {"medium", "high"}, report.to_dict()
-    assert report.finish.frame_index < frame_index - 1, report.to_dict()
-    assert {"stroke_rhythm", "vertical_path", "cycle_economy", "finish_execution"}.issubset(
-        {metric.key for metric in report.technique.metrics}
-    )
+    assert [length.number for length in report.lengths] == [1, 2]
+    assert abs(report.lengths[0].split_s - 14.4) <= 0.5 and abs(report.lengths[1].split_s - 16.6) <= 0.5
+    assert report.race_time_source == "video" and abs(report.race_time_s - 31.0) <= 0.4
+    # Hand count from the footage: about 110-115 arm strokes per minute.
+    assert all(100 <= length.stroke_rate_spm <= 125 for length in report.lengths)
+    assert report.summary and report.technique and report.focus_areas

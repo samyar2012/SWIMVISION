@@ -10,9 +10,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 # --- Race options shown in the UI -------------------------------------------
-# Tracking works the same for every stroke. Race analysis supports each listed
-# stroke through 200; IM stroke-cycle classification remains explicitly withheld.
-STROKES: tuple[str, ...] = ("Freestyle", "Backstroke", "Breaststroke", "Butterfly", "Individual Medley")
+# The four competitive strokes. Race analysis supports each through 200.
+STROKES: tuple[str, ...] = ("Freestyle", "Backstroke", "Breaststroke", "Butterfly")
 
 # Pool code -> (human label, distance unit, length of one pool length in that unit)
 POOLS: dict[str, tuple[str, str, int]] = {
@@ -28,22 +27,16 @@ EVENTS: dict[str, dict[str, tuple[int, ...]]] = {
     "SCY": {
         "Freestyle": (25, 50, 100, 200, 500, 1000, 1650),
         "Backstroke": _STROKE_EVENTS, "Breaststroke": _STROKE_EVENTS, "Butterfly": _STROKE_EVENTS,
-        "Individual Medley": (100, 200, 400),
     },
     "SCM": {
         "Freestyle": (25, 50, 100, 200, 400, 800, 1500),
         "Backstroke": _STROKE_EVENTS, "Breaststroke": _STROKE_EVENTS, "Butterfly": _STROKE_EVENTS,
-        "Individual Medley": (100, 200, 400),
     },
     "LCM": {
         "Freestyle": (50, 100, 200, 400, 800, 1500),
         "Backstroke": (50, 100, 200), "Breaststroke": (50, 100, 200), "Butterfly": (50, 100, 200),
-        "Individual Medley": (200, 400),
     },
 }
-
-# Individual medley order: each stroke covers a quarter of the race.
-IM_ORDER: tuple[str, ...] = ("Butterfly", "Backstroke", "Breaststroke", "Freestyle")
 
 
 def distance_unit_for_pool(pool: str) -> str:
@@ -92,11 +85,9 @@ class RaceInfo:
         return self.lengths - 1
 
     @property
-    def im_segments(self) -> tuple[tuple[str, int], ...]:
-        """For an IM: ``(stroke, distance)`` per leg in race order; empty otherwise."""
-        if self.stroke != "Individual Medley":
-            return ()
-        return tuple((stroke, self.distance // 4) for stroke in IM_ORDER)
+    def flip_turns(self) -> bool:
+        """Freestyle and backstroke turn with a flip; butterfly and breaststroke touch with both hands."""
+        return self.stroke in ("Freestyle", "Backstroke")
 
     @property
     def label(self) -> str:

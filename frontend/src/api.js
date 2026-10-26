@@ -18,6 +18,7 @@ export async function createAnalysis({ file, stroke, distance, pool, officialTim
 }
 
 export const getFrameUrl = (analysisId) => `${API_BASE}/api/analyses/${analysisId}/frame`
+export const getVideoUrl = (analysisId) => `${API_BASE}/api/analyses/${analysisId}/video`
 export const selectSwimmer = (analysisId, point) => request(`/api/analyses/${analysisId}/selection`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(point),
 })
@@ -26,6 +27,13 @@ export const startAnalysis = (analysisId, officialTime) => request(`/api/analyse
 })
 export const getAnalysisStatus = (analysisId) => request(`/api/analyses/${analysisId}/status`)
 export const getAnalysis = (analysisId) => request(`/api/analyses/${analysisId}`)
-export const askCoach = (analysisId, question) => request(`/api/analyses/${analysisId}/coach`, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+export const askCoach = (analysisId, question, history) => request(`/api/analyses/${analysisId}/coach`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, history }),
 })
+
+/** Latest highlighted tracking frame as an object URL, or null while none is available. */
+export async function fetchLiveFrame(analysisId) {
+  const response = await fetch(`${API_BASE}/api/analyses/${analysisId}/live?t=${Date.now()}`, { cache: 'no-store' })
+  if (!response.ok) return null
+  return URL.createObjectURL(await response.blob())
+}
