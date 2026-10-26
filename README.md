@@ -27,7 +27,7 @@ SwimVision lets a swimmer upload an ordinary race video and uses computer vision
 | Plain-language findings, evidence, example training sets and general nutrition/recovery guidance | ✅ First analysis version |
 | Ordered water-entry and first-stroke breakout estimates, charts, JSON/TXT/CSV exports | ✅ First analysis version |
 | Visible technique analysis: rhythm consistency, vertical body path, cycle economy, turn/breakout consistency, finish execution | ✅ First analysis version |
-| Sustained-stop finish estimate plus optional user-entered official race time | ✅ First analysis version |
+| Sustained-stop finish estimate from the complete video | ✅ First analysis version |
 | Audio-buzzer timing, exact wall-contact frame, calibrated pool coordinates and swim-specific pose | Not production-validated |
 
 ## How Phase 2 works
@@ -126,8 +126,7 @@ the tracker's deck-to-water state change to anchor takeoff, requires the correct
 reversals before showing per-length splits, and analyses a temporal sequence of swimmer-only crops for
 stroke rhythm. It never fills missing turns by dividing the race evenly. Near the end of the final length, it
 looks for at least 0.5 seconds of sustained low movement and places the estimated finish at the onset of that
-stop. The swimmer can instead enter an official race time from a meet result or stopwatch; the app keeps the
-automatic video estimate beside it rather than overwriting the evidence.
+stop. The current interface does not ask the swimmer to enter a stop time or choose an end time.
 
 The report has six plain-language tabs. Its Technique tab reports repeatable signals that this camera can support:
 stroke-timing consistency, vertical body-path control, first-to-last cycle economy, turn/breakout consistency and

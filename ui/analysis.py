@@ -19,28 +19,13 @@ logger = logging.getLogger(__name__)
 def render_analysis(record: AnalysisRecord) -> None:
     step_label("Step 4 · Understand your race")
     st.write("Turn the verified swimmer path into technique feedback, race events, splits and an improvement plan.")
-    saved_official = (
-        record.performance.race_time_s
-        if record.performance is not None and record.performance.race_time_source == "official_manual"
-        else max(1.0, min(record.video.duration_s, 30.0))
-    )
-    use_official = st.checkbox(
-        "I know the official race time",
-        value=record.performance is not None and record.performance.race_time_source == "official_manual",
-        key=f"official_time_enabled_{record.analysis_id}",
-        help="Use a scoreboard, meet result or stopwatch time. Video events are still estimated independently.",
-    )
-    official_time = st.number_input(
-        "Official race time (seconds)", min_value=0.01, value=float(saved_official), step=0.01,
-        disabled=not use_official, key=f"official_time_{record.analysis_id}",
-    )
     if record.performance is None:
         if st.button("Analyze my race", type="primary", width="stretch"):
-            _run_analysis(record, float(official_time) if use_official else None)
+            _run_analysis(record)
         return
     _render_report(record.performance)
     if st.button("Re-analyze this race", width="stretch"):
-        _run_analysis(record, float(official_time) if use_official else None)
+        _run_analysis(record)
 
 
 def _run_analysis(record: AnalysisRecord, official_time_s: float | None = None) -> None:

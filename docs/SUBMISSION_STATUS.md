@@ -11,7 +11,7 @@
 - Per-length provisional splits, speed, stroke cycles, cycle rate and distance per cycle.
 - Visible-technique report for rhythm consistency, vertical body path, cycle-economy retention,
   turn/breakout consistency and finish execution, with unavailable anatomy explicitly withheld.
-- Sustained-stop finish estimate and optional user-entered official time; both preserve the automatic video evidence.
+- Sustained-stop finish estimate from the complete video; the interface does not ask for a stop or end time.
 - Plain-language strengths, improvement priorities, example training sets, general food-first recovery guidance,
   confidence labels and downloadable JSON/TXT/CSV reports.
 - Automated tests for every supported distance/stroke/pool configuration and a full real-video regression.
