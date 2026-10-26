@@ -18,7 +18,7 @@ from core.race_analysis import (
 )
 from core.video import VideoMetadata
 from storage.analyses import AnalysisRecord, load_analysis, save_analysis
-from ui.analysis import _plain_report
+from ui.analysis import _parse_race_time, _plain_report
 
 
 def _synthetic_track(lengths: int, fps: float = 10.0, seconds_per_length: float = 8.0,
@@ -169,3 +169,18 @@ def test_report_never_calls_estimated_tracking_direct_evidence(tmp_path):
     report = analyze_race(video, table, race, meta)
     assert 0.49 <= report.track_observed_fraction <= 0.51
     assert any("estimated positions" in finding.title.lower() for finding in report.findings)
+
+
+@pytest.mark.parametrize(("entered", "seconds"), [
+    ("54.32", 54.32),
+    ("1:54.32", 114.32),
+    (" 2:03.5 ", 123.5),
+])
+def test_official_time_accepts_stopwatch_formats(entered, seconds):
+    assert _parse_race_time(entered) == seconds
+
+
+@pytest.mark.parametrize("entered", ["", "1:75", "1:2:3", "words", "0"])
+def test_official_time_rejects_invalid_values(entered):
+    with pytest.raises(ValueError):
+        _parse_race_time(entered)

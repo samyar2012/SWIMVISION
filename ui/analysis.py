@@ -8,6 +8,7 @@ import logging
 import pandas as pd
 import streamlit as st
 
+from core.coach import answer_coach_question, build_coach_brief
 from core.errors import SwimVisionError
 from core.race_analysis import Finding, RaceAnalysis, analyze_race
 from storage.analyses import AnalysisRecord, load_tracking_table, save_analysis
@@ -18,14 +19,66 @@ logger = logging.getLogger(__name__)
 
 def render_analysis(record: AnalysisRecord) -> None:
     step_label("Step 4 · Understand your race")
-    st.write("Turn the verified swimmer path into technique feedback, race events, splits and an improvement plan.")
+    st.write("See what went well, what to improve first, and what to practice next.")
+    official_time_s = _official_time_input(record)
     if record.performance is None:
         if st.button("Analyze my race", type="primary", width="stretch"):
-            _run_analysis(record)
+            if official_time_s is not False:
+                _run_analysis(record, official_time_s)
         return
     _render_report(record.performance)
-    if st.button("Re-analyze this race", width="stretch"):
-        _run_analysis(record)
+    if st.button("Update my analysis", width="stretch"):
+        if official_time_s is not False:
+            _run_analysis(record, official_time_s)
+
+
+def _parse_race_time(value: str) -> float:
+    """Accept familiar stopwatch formats: SS.ss or M:SS.ss."""
+    text = value.strip()
+    if not text:
+        raise ValueError("Enter your race time.")
+    try:
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) != 2:
+                raise ValueError
+            minutes, seconds = int(parts[0]), float(parts[1])
+            if minutes < 0 or not 0 <= seconds < 60:
+                raise ValueError
+            total = minutes * 60 + seconds
+        else:
+            total = float(text)
+    except ValueError as exc:
+        raise ValueError("Use seconds (54.32) or minutes and seconds (1:54.32).") from exc
+    if not 0 < total < 3600:
+        raise ValueError("Race time must be greater than zero and less than one hour.")
+    return round(total, 3)
+
+
+def _official_time_input(record: AnalysisRecord) -> float | None | bool:
+    report = record.performance
+    current = report.race_time_s if report and report.race_time_source == "official_manual" else None
+    with st.expander("Add my official race time (optional)", expanded=current is not None):
+        st.caption("This only improves the report. It does not stop the video, change tracking, or choose a frame.")
+        use_official = st.checkbox(
+            "Use a time from the scoreboard or stopwatch",
+            value=current is not None,
+            key=f"official-time-enabled-{record.analysis_id}",
+        )
+        value = st.text_input(
+            "Official race time",
+            value=_format_seconds_input(current) if current is not None else "",
+            placeholder="Example: 54.32 or 1:54.32",
+            disabled=not use_official,
+            key=f"official-time-value-{record.analysis_id}",
+        )
+        if not use_official:
+            return None
+        try:
+            return _parse_race_time(value)
+        except ValueError as exc:
+            st.warning(str(exc))
+            return False
 
 
 def _run_analysis(record: AnalysisRecord, official_time_s: float | None = None) -> None:
@@ -58,8 +111,15 @@ def _format_seconds(value: float) -> str:
     return f"{minutes}:{seconds:05.2f}" if minutes else f"{seconds:.2f} s"
 
 
+def _format_seconds_input(value: float) -> str:
+    minutes = int(value // 60)
+    seconds = value - minutes * 60
+    return f"{minutes}:{seconds:05.2f}" if minutes else f"{seconds:.2f}"
+
+
 def _plain_report(report: RaceAnalysis) -> str:
     """Family/coach-friendly text export without Streamlit or HTML."""
+    brief = build_coach_brief(report)
     lines = [
         "SWIMVISION RACE REPORT",
         report.race_label,
@@ -74,12 +134,15 @@ def _plain_report(report: RaceAnalysis) -> str:
     ]
     for finding in report.findings:
         lines.extend((f"- {finding.title}: {finding.explanation}", f"  Next step: {finding.action}"))
-    lines.extend(("", "TECHNIQUE ANALYSIS", report.technique.summary))
-    for metric in report.technique.metrics:
-        lines.extend((
-            f"- {metric.label} [{metric.rating}; {metric.confidence} confidence]: {metric.value}",
-            f"  {metric.explanation}", f"  Next step: {metric.action}",
-        ))
+    lines.extend(("", "TECHNIQUE", brief.headline, brief.overview))
+    if brief.strengths:
+        lines.append("What looked good:")
+        for point in brief.strengths:
+            lines.append(f"- {point.title}: {point.explanation}")
+    if brief.priorities:
+        lines.append("What to work on first:")
+        for point in brief.priorities:
+            lines.extend((f"- {point.title}: {point.explanation}", f"  Try this: {point.action}"))
     lines.extend(("", "EXAMPLE TRAINING SETS"))
     for item in report.training_sets:
         lines.extend((f"- {item.name}: {item.set_text}", f"  Success check: {item.success_check}"))
@@ -99,10 +162,11 @@ def _render_finding(finding: Finding) -> None:
 
 
 def _render_report(report: RaceAnalysis) -> None:
-    st.success("Ready to use: selected-swimmer tracking, visible technique signals, race timeline, turn checks and evidence export.")
+    brief = build_coach_brief(report)
+    st.success(brief.headline)
     if report.status == "review_needed":
-        st.warning("Review before presenting as exact: takeoff, finish, breakout and stroke-cycle values are automatic estimates. Low-confidence numbers are marked.")
-    with st.expander("What is verified, estimated, and experimental", expanded=False):
+        st.caption("Some video measurements are estimates. Open ‘How this was measured’ only if you want the details.")
+    with st.expander("How this was measured", expanded=False):
         st.write("**Verified:** video timing, frame numbers, selected-swimmer path, tracking status and expected race structure.")
         st.write("**Estimated:** takeoff, water entry, turns, breakouts, stopped-at-wall finish and any splits built from those events.")
         st.write("**Experimental:** stroke cycles/rate and technique proxies from temporal motion. Use the evidence before coaching from them.")
@@ -120,23 +184,47 @@ def _render_report(report: RaceAnalysis) -> None:
     for col, (label, value, sub) in zip(st.columns(4), cards):
         col.markdown(metric_card(label, value, sub), unsafe_allow_html=True)
 
-    tab_summary, tab_technique, tab_splits, tab_plan, tab_food, tab_evidence = st.tabs(
-        ["Summary", "Technique", "Splits & strokes", "Training plan", "Fuel & recovery", "Evidence"])
+    tab_summary, tab_technique, tab_splits, tab_plan, tab_food, tab_coach, tab_evidence = st.tabs(
+        ["Summary", "Technique", "Splits & strokes", "Training plan", "Fuel & recovery", "Ask coach", "Evidence"])
     with tab_summary:
-        st.markdown("#### Your clearest takeaways")
-        for finding in report.findings:
-            _render_finding(finding)
+        st.markdown(f"#### {brief.headline}")
+        st.write(brief.overview)
+        if brief.next_practice:
+            st.markdown("#### Your next practice")
+            st.write(f"**{brief.next_practice.name}:** {brief.next_practice.set_text}")
+            st.caption(f"Success looks like: {brief.next_practice.success_check}")
+        with st.expander("More race takeaways", expanded=False):
+            for finding in report.findings:
+                _render_finding(finding)
 
     with tab_technique:
-        st.markdown("#### What your technique did in this video")
-        st.write(report.technique.summary)
-        for metric in report.technique.metrics:
-            icon = {"good": "✅", "improve": "🎯", "check": "🔎", "not_measurable": "➖"}.get(metric.rating, "•")
-            with st.expander(f"{icon} {metric.label} — {metric.value}", expanded=metric.rating == "improve"):
-                st.write(metric.explanation)
-                st.write(f"**What to do:** {metric.action}")
-                st.caption(f"Confidence: {metric.confidence} · Evidence: {metric.evidence}")
-        st.info("This version analyses repeatable movement visible in the tracked video. It does not pretend a swimmer box is an elbow, wrist, head or ankle keypoint.")
+        st.markdown("#### Your technique, in plain language")
+        if brief.strengths:
+            st.markdown("##### What looked good")
+            for point in brief.strengths:
+                st.write(f"**✅ {point.title}**")
+                st.write(point.explanation)
+        else:
+            st.info("This angle did not show a clear, repeatable strength. That does not mean your technique was bad.")
+
+        st.markdown("##### What to work on first")
+        if brief.priorities:
+            for number, point in enumerate(brief.priorities, start=1):
+                st.write(f"**{number}. {point.title}**")
+                st.write(point.explanation)
+                st.write(f"Try this: {point.action}")
+        else:
+            st.write("No clear technique problem was measurable in this video.")
+
+        with st.expander("See measurements and camera limits", expanded=False):
+            for metric in report.technique.metrics:
+                if metric.rating == "not_measurable":
+                    continue
+                st.write(f"**{metric.label}:** {metric.value}")
+                st.caption(f"Confidence: {metric.confidence} · {metric.evidence}")
+            if report.technique.not_measurable:
+                st.write("**This camera could not reliably judge:** " + ", ".join(report.technique.not_measurable))
+                st.caption("SwimVision leaves these blank instead of guessing.")
 
     with tab_splits:
         if report.lengths:
@@ -186,6 +274,9 @@ def _render_report(report: RaceAnalysis) -> None:
         st.warning("SwimVision does not prescribe calories, weight change, supplements or a medical diet. Young athletes should make nutrition decisions with a parent/guardian and a qualified sports dietitian.")
         st.caption("Guidance basis: USA Swimming nutrition resources, USOPC's food-first Athlete Plate, and USADA's athlete nutrition guide.")
 
+    with tab_coach:
+        _render_coach_chat(report)
+
     with tab_evidence:
         if report.race_time_source == "official_manual":
             st.write(f"**Official time entered by user:** {_format_seconds(report.race_time_s)}")
@@ -200,7 +291,12 @@ def _render_report(report: RaceAnalysis) -> None:
         for limitation in report.limitations:
             st.write(f"• {limitation}")
         st.download_button(
-            "Download complete analysis (JSON)",
+            "Download app-ready coach summary (JSON)",
+            json.dumps(brief.to_dict(), indent=2).encode("utf-8"),
+            file_name="swimvision-coach-summary.json", mime="application/json",
+        )
+        st.download_button(
+            "Download complete technical analysis (JSON)",
             json.dumps(report.to_dict(), indent=2).encode("utf-8"),
             file_name="swimvision-analysis.json", mime="application/json",
         )
@@ -215,3 +311,21 @@ def _render_report(report: RaceAnalysis) -> None:
                 pd.DataFrame([item.__dict__ for item in report.lengths]).to_csv(index=False).encode("utf-8"),
                 file_name="swimvision-lengths.csv", mime="text/csv",
             )
+
+
+def _render_coach_chat(report: RaceAnalysis) -> None:
+    st.markdown("#### Ask SwimVision Coach")
+    st.write("Ask what to fix, what went well, or what to practice next. Answers stay inside this race report.")
+    key = f"coach-messages-{report.race_label}-{report.start.frame_index}-{report.finish.frame_index}"
+    messages = st.session_state.setdefault(key, [])
+    if not messages:
+        messages.append({"role": "assistant", "content": build_coach_brief(report).overview})
+    for message in messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+    question = st.chat_input("Ask your coach a question", key=f"coach-input-{key}")
+    if question:
+        messages.append({"role": "user", "content": question})
+        answer = answer_coach_question(report, question)
+        messages.append({"role": "assistant", "content": answer})
+        st.rerun()

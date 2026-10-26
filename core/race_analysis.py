@@ -768,14 +768,16 @@ def _technique_analysis(
             "Required anatomical keypoints are not produced by the current model",
         ))
 
-    good = sum(metric.rating == "good" for metric in metrics)
-    improve = sum(metric.rating == "improve" for metric in metrics)
-    if improve:
-        summary = f"The video shows {good} stable technique signal(s) and {improve} measurable area(s) to improve."
-    elif good:
-        summary = f"The visible signals are mostly controlled, with {good} measurable strength(s); unavailable details are not guessed."
+    good_metrics = [metric for metric in metrics if metric.rating == "good"]
+    improve_metrics = [metric for metric in metrics if metric.rating == "improve"]
+    if improve_metrics:
+        first = improve_metrics[0]
+        summary = f"Start with {first.label.lower()}. {first.action}"
+    elif good_metrics:
+        first = good_metrics[0]
+        summary = f"{first.label} was the clearest strength visible in this swim. {first.action}"
     else:
-        summary = "The video supports limited technique measurement; unavailable details are not guessed."
+        summary = "This camera view did not show enough repeatable movement for a confident technique grade."
     measured = tuple(metric.label for metric in metrics if metric.rating != "not_measurable")
     unavailable = tuple(metric.label for metric in metrics if metric.rating == "not_measurable")
     return TechniqueAnalysis(summary, tuple(metrics), measured, unavailable)
